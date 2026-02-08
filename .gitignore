@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Editors / tooling
+.vscode/
+.pytest_cache/
+.ruff_cache/
+
+# NoneBot env files
+.env
+.env.*
+
+# Local data / caches
+/data/
+/data/chroma_db/
+/data/courses/Allrepo-temp/
+
+# OS
+.DS_Store
+Thumbs.db
