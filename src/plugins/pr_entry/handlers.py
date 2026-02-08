@@ -13,7 +13,8 @@ from .prserver_client import ensure_pr, get_course_structure, get_course_toml, s
 from .settings import settings
 
 import tomlkit
-from tomlkit.items import AoT, Table
+from tomlkit.items import AoT, Array, InlineTable, Table
+from tomlkit.toml_document import TOMLDocument
 
 
 @dataclass
@@ -155,8 +156,8 @@ async def _send_forward(bot: Bot, event: MessageEvent, nodes: list[dict]) -> boo
         return False
 
 
-def _doc_table(doc: object) -> Table:
-    if not isinstance(doc, Table):
+def _doc_table(doc: object) -> Table | TOMLDocument:
+    if not isinstance(doc, (Table, TOMLDocument)):
         raise ValueError("invalid TOML doc")
     return doc
 
@@ -770,7 +771,7 @@ async def _(bot: Bot, event: MessageEvent):
             item_index=idx1 - 1,
         )
         await matcher.finish(
-            "将修改章节《{section_title}》的第 {idx1} 条内容（按序号）。\n"
+            f"将修改章节《{section_title}》的第 {idx1} 条内容（按序号）。\n"
             "请下一条消息发送修改后的完整正文（不要带多余解释）。"
         )
 
@@ -1043,6 +1044,7 @@ async def _(bot: Bot, event: MessageEvent):
             )
             await matcher.send("好的，不留名。")
             # fallthrough to build_patch below
+            pending = _PENDING.get(_key(event))  # refresh local state
         else:
             await matcher.finish("请回复 y 或 n")
 
@@ -1085,6 +1087,7 @@ async def _(bot: Bot, event: MessageEvent):
         )
         await matcher.send("收到。")
         # fallthrough to build_patch below
+        pending = _PENDING.get(_key(event))  # refresh local state
 
     if pending.mode == "build_patch":
         author = None

@@ -50,7 +50,14 @@ def _client() -> ChatOpenAI:
 
 
 async def moderate_toml(toml_text: str) -> ModerationResult:
-    llm = _client()
+    try:
+        llm = _client()
+    except Exception as e:
+        return ModerationResult(
+            approved=False,
+            reason=f"内容审核未配置或初始化失败：{e}",
+            raw={"error": str(e)},
+        )
     messages = [
         {"role": "system", "content": _PROMPT},
         {"role": "user", "content": toml_text},

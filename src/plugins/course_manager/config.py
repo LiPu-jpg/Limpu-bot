@@ -29,6 +29,14 @@ class Config(BaseModel):
     # --- Git 配置 ---
     REPO_URL: str = _env("HITSZ_MANAGER_COURSE_REPO_URL", "https://github.com/LiPu-jpg/Allrepo-temp.git") or ""
 
+    # --- GitHub Org 同步配置（推荐） ---
+    # 若设置为非空，则 /刷 会从 GitHub Org 枚举仓库并同步到 data/courses/<repo_name>/
+    # 过滤规则（按你当前约定）：仓库名首字符大写，且不包含 '-'
+    GITHUB_ORG: str = _env("HITSZ_MANAGER_GITHUB_ORG", "HITSZ-OpenAuto") or ""
+    GITHUB_TOKEN: str = _env("HITSZ_MANAGER_GITHUB_TOKEN", "") or ""
+    GITHUB_API_BASE: str = _env("HITSZ_MANAGER_GITHUB_API_BASE", "https://api.github.com") or ""
+    GIT_SYNC_CONCURRENCY: int = int(_env("HITSZ_MANAGER_GIT_SYNC_CONCURRENCY", "4") or 4)
+
     # --- LLM 配置 (Gemini via OneAPI/NewAPI) ---
     # 注意：不要把 key 写进代码。请用环境变量配置：HITSZ_MANAGER_AI_API_KEY
     AI_API_KEY: str = _env("HITSZ_MANAGER_AI_API_KEY", "") or ""

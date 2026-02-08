@@ -31,8 +31,10 @@ async def handle_search(keyword: str):
         await matcher_search.finish(f"🧐 未找到包含 '{keyword}' 的课程。")
     
     # 如果只有一个结果，且匹配度很高，可以考虑直接展示（这里简单处理，还是列表展示）
-    msg = f"🔍 找到以下课程：\n" + "\n".join([f"• {m}" for m in matches])
-    msg += "\n\n💡 请使用「/查 课程全名」或「/查 课程代码」获取详情"
+    msg = "🔍 找到以下课程（建议直接复制课程代码查询）：\n" + "\n".join(
+        [f"• {m['code']} - {m['name']}" for m in matches]
+    )
+    msg += "\n\n💡 请使用「/查 课程代码」获取详情"
     await matcher_search.finish(msg)
 
 
@@ -49,37 +51,135 @@ async def handle_query(bot: Bot, event: MessageEvent, target: str):
     if not course:
         await matcher_query.finish(f"❌ 未找到 '{target}'，请先尝试使用 /搜 确认名称。")
 
-    # 构建合并转发消息
+    def _norm_text(s: str) -> str:
+        return (s or "").strip().replace("\r\n", "\n")
+
+    def _safe_str(v) -> str:
+        return "" if v is None else str(v)
+
+    def _push_block(title: str, body: str):
+        body = _norm_text(body)
+        if not body:
+            return
+        nodes.append(make_node(bot, f"{title}\n{body}".strip()))
+
+    # 构建合并转发消息（兼容新旧两套 schema）
     nodes = []
-    
-    # 1. 头部信息
-    header = f"📚 【{course['course_name']}】\n代码：{course['course_code']}\n══════════════════\n"
-    if course.get("notices"):
-        header += f"📢 注意事项：\n{course['notices'].strip()}\n"
-    nodes.append(make_node(bot, header))
 
-    # 2. 老师信息
-    if course.get("lecturers"):
-        for lec in course['lecturers']:
-            txt = f"👨‍🏫 授课教师：{lec['name']}\n"
-            for rev in lec.get("reviews", []):
-                txt += f"\n「{rev['content'].strip()}」\n"
-            nodes.append(make_node(bot, txt))
+    # multi-project 子课程 wrapper
+    if isinstance(course, dict) and course.get("_schema") == "multi-project-item":
+        parent = course.get("_parent") or {}
+        idx = int(course.get("_course_index") or 0)
+        courses = parent.get("courses") if isinstance(parent, dict) else None
+        sub = courses[idx] if isinstance(courses, list) and 0 <= idx < len(courses) else {}
 
-    # 3. 各板块评价
-    sections = [
-        ("course", "📖 课程评价"), ("exam", "📝 考试经验"), 
-        ("lab", "🧪 实验经验"), ("advice", "💡 学习建议"),
-        ("schedule", "📅 课程安排"), ("misc", "📦 其他杂项")
-    ]
-    for key, title in sections:
-        if course.get(key):
-            txt = f"{title}\n" + "\n".join([f"• {item['content'].strip()}" for item in course[key]])
-            nodes.append(make_node(bot, txt))
+        header = (
+            f"📚 【{_safe_str(course.get('course_name'))}】\n"
+            f"代码：{_safe_str(course.get('course_code'))}\n"
+            f"══════════════════\n{_norm_text(_safe_str(parent.get('description')))}"
+        ).strip()
+        nodes.append(make_node(bot, header))
 
-    # 4. 底部链接
-    footer = "🔗 相关资源\n👉 完整内容：https://hoa.moe"
-    nodes.append(make_node(bot, footer))
+        # teachers + reviews
+        teachers = sub.get("teachers") if isinstance(sub, dict) else None
+        if isinstance(teachers, list):
+            for t in teachers:
+                if not isinstance(t, dict):
+                    continue
+                name = _safe_str(t.get("name") or "(未命名教师)")
+                reviews = t.get("reviews")
+                txt = f"👨‍🏫 授课教师：{name}\n"
+                if isinstance(reviews, list):
+                    for rev in reviews:
+                        if isinstance(rev, dict) and rev.get("content"):
+                            txt += f"\n「{_norm_text(_safe_str(rev.get('content')))}」\n"
+                nodes.append(make_node(bot, txt.strip()))
+
+        # sections/items
+        sections = sub.get("sections") if isinstance(sub, dict) else None
+        if isinstance(sections, list):
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                title = _safe_str(sec.get("title") or "(未命名章节)")
+                items = sec.get("items")
+                blocks = []
+                if isinstance(items, list):
+                    for it in items:
+                        if isinstance(it, dict) and it.get("content"):
+                            blocks.append(_norm_text(_safe_str(it.get("content"))))
+                _push_block(f"📌 {title}", "\n\n".join([b for b in blocks if b]))
+
+    # new schema: sections/lecturers
+    elif isinstance(course, dict) and isinstance(course.get("sections"), list):
+        header = (
+            f"📚 【{_safe_str(course.get('course_name'))}】\n"
+            f"代码：{_safe_str(course.get('course_code'))}\n"
+            f"══════════════════\n{_norm_text(_safe_str(course.get('description')))}"
+        ).strip()
+        if course.get("notices"):
+            header += f"\n\n📢 注意事项：\n{_norm_text(_safe_str(course.get('notices')))}"
+        nodes.append(make_node(bot, header))
+
+        lecturers = course.get("lecturers")
+        if isinstance(lecturers, list):
+            for lec in lecturers:
+                if not isinstance(lec, dict):
+                    continue
+                txt = f"👨‍🏫 授课教师：{_safe_str(lec.get('name') or '(未命名教师)')}\n"
+                reviews = lec.get("reviews")
+                if isinstance(reviews, list):
+                    for rev in reviews:
+                        if isinstance(rev, dict) and rev.get("content"):
+                            txt += f"\n「{_norm_text(_safe_str(rev.get('content')))}」\n"
+                nodes.append(make_node(bot, txt.strip()))
+
+        for sec in course.get("sections"):
+            if not isinstance(sec, dict):
+                continue
+            title = _safe_str(sec.get("title") or "(未命名章节)")
+            items = sec.get("items")
+            blocks = []
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict) and it.get("content"):
+                        blocks.append(_norm_text(_safe_str(it.get("content"))))
+            _push_block(f"📌 {title}", "\n\n".join([b for b in blocks if b]))
+
+    # legacy schema: course/exam/lab/advice...
+    else:
+        header = f"📚 【{course.get('course_name', '')}】\n代码：{course.get('course_code', '')}\n══════════════════\n"
+        if course.get("notices"):
+            header += f"📢 注意事项：\n{_norm_text(_safe_str(course.get('notices')))}\n"
+        nodes.append(make_node(bot, header.strip()))
+
+        if course.get("lecturers"):
+            for lec in course["lecturers"]:
+                if not isinstance(lec, dict):
+                    continue
+                txt = f"👨‍🏫 授课教师：{lec.get('name', '')}\n"
+                for rev in lec.get("reviews", []):
+                    if isinstance(rev, dict) and rev.get("content"):
+                        txt += f"\n「{_norm_text(_safe_str(rev.get('content')))}」\n"
+                nodes.append(make_node(bot, txt.strip()))
+
+        sections = [
+            ("course", "📖 课程评价"),
+            ("exam", "📝 考试经验"),
+            ("lab", "🧪 实验经验"),
+            ("advice", "💡 学习建议"),
+            ("schedule", "📅 课程安排"),
+            ("misc", "📦 其他杂项"),
+        ]
+        for key, title in sections:
+            if course.get(key):
+                items = []
+                for item in course[key]:
+                    if isinstance(item, dict) and item.get("content"):
+                        items.append(f"• {_norm_text(_safe_str(item.get('content')))}")
+                _push_block(title, "\n".join(items))
+
+    nodes.append(make_node(bot, "🔗 相关资源\n👉 完整内容：https://hoa.moe"))
 
     try:
         if event.group_id:

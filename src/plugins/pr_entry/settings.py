@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _env(key: str, default: str | None = None) -> str | None:
@@ -27,7 +27,7 @@ class PrEntrySettings:
     llm_model: str = _env("HITSZ_MANAGER_AI_MODEL", "gemini-2.5-pro") or ""
 
     # 权限：为空=允许所有人（不推荐，但按你当前需求默认兼容）
-    allowed_users: set[str] = _split_csv(_env("HITSZ_MANAGER_ALLOWED_USERS", ""))
+    allowed_users: set[str] = field(default_factory=lambda: _split_csv(_env("HITSZ_MANAGER_ALLOWED_USERS", "")))
 
 
 settings = PrEntrySettings()

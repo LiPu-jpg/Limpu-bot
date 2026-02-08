@@ -35,5 +35,3 @@ nonebot-adapter-onebot = [
 nonebot-plugin-status = ["nonebot_plugin_status"]
 nonebot-plugin-apscheduler = ["nonebot_plugin_apscheduler"]
 nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
-course_manager = ["course_manager"]
-pr_entry = ["pr_entry"]
