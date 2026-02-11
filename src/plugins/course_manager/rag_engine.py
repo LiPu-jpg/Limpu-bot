@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Any, Optional, cast
 
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -29,20 +29,58 @@ class RagEngine:
         if self.llm is None:
             if not config.AI_API_KEY:
                 raise RuntimeError("未配置 HITSZ_MANAGER_AI_API_KEY")
-            self.llm = ChatOpenAI(
-                openai_api_key=config.AI_API_KEY,
-                openai_api_base=config.AI_BASE_URL,
-                model_name=config.AI_MODEL,
-                temperature=0.3,
-            )
+
+            # langchain_openai 不同版本参数名不一致，动态映射避免运行时报错
+            fields = getattr(ChatOpenAI, "model_fields", {}) or {}
+            # 这里用 dict + **params 是为了兼容不同版本的 ChatOpenAI 参数名。
+            # 但若不显式标注类型，Pylance 会把 params 推断成 dict[str, float]，
+            # 从而在后续写入 str/bool 等值时报一堆误报。
+            params: dict[str, Any] = {"temperature": 0.3}
+
+            if "openai_api_key" in fields:
+                params["openai_api_key"] = config.AI_API_KEY
+            elif "api_key" in fields:
+                params["api_key"] = config.AI_API_KEY
+
+            if config.AI_BASE_URL:
+                if "openai_api_base" in fields:
+                    params["openai_api_base"] = config.AI_BASE_URL
+                elif "base_url" in fields:
+                    params["base_url"] = config.AI_BASE_URL
+
+            if "model" in fields:
+                params["model"] = config.AI_MODEL
+            elif "model_name" in fields:
+                params["model_name"] = config.AI_MODEL
+
+            self.llm = ChatOpenAI(**cast(Any, params))
 
         if self.embeddings is None:
+            # 为了避免每次容器重启都重新下载模型，这里把缓存固定到 data 目录下。
+            # 若 data 挂载为 volume，则模型下载一次后可复用。
+            cache_root = str((config.DATA_ROOT / "hf_cache").resolve())
+            os.environ.setdefault("HF_HOME", cache_root)
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(cache_root, "hub"))
+            os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(cache_root, "transformers"))
+
             print("🧠 正在加载 Embedding 模型 (CPU)...")
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=config.EMBEDDING_MODEL,
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True},
-            )
+            try:
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name=config.EMBEDDING_MODEL,
+                    cache_folder=cache_root,
+                    model_kwargs={"device": "cpu"},
+                    encode_kwargs={"normalize_embeddings": True},
+                )
+            except Exception as e:
+                hint = (
+                    "Embedding 模型下载/加载失败。通常是服务器无法访问 huggingface.co，且本地缓存不存在。\n"
+                    f"- 当前模型：{config.EMBEDDING_MODEL}\n"
+                    f"- 缓存目录：{cache_root}\n"
+                    "可选修复：\n"
+                    "1) 设置 HuggingFace 镜像：HITSZ_MANAGER_HF_ENDPOINT=https://hf-mirror.com （或你可用的镜像）并重启；\n"
+                    "2) 或在有网络的机器上预下载该模型到上述缓存目录，再拷贝/挂载到服务器。"
+                )
+                raise RuntimeError(hint) from e
 
         self._load_existing_db()
 
@@ -108,6 +146,10 @@ class RagEngine:
         if not self.retriever:
             return "⚠️ 知识库尚未初始化，请先使用指令构建知识库。"
 
+        llm = self.llm
+        if llm is None:
+            return "❌ LLM 未初始化"
+
         template = """你是一个哈工大深圳(HITSZ)的校园助手。请根据以下已知信息回答用户的问题。
         
         严格遵守以下规则：
@@ -125,7 +167,7 @@ class RagEngine:
         chain = (
             {"context": self.retriever, "question": RunnablePassthrough()}
             | prompt
-            | self.llm
+            | llm
             | StrOutputParser()
         )
 

@@ -30,6 +30,5 @@ driver = get_driver()
 async def _():
     # 加载课程 JSON/TOML
     course_manager.load_data()
-    
-    # 提示：RAG 引擎会在第一次 import handlers 时自动初始化 (加载 Embedding 模型)
-    # 这可能会导致启动时卡顿 5-10 秒，是正常的。
+
+    # 提示：RAG 引擎为懒加载，仅在首次使用 /问 或 /重构知识库 时初始化。

@@ -108,7 +108,13 @@ LLM（用于 **RAG 问答** + **PR 内容合规审核**）：
 
 #### (1) 开始会话
 
-- `@bot /pr start <repo_name> <course_code> <course_name...> <repo_type>`
+- 推荐：`@bot /pr start <repo_name>`
+  - 例：`@bot /pr start AUTO2001`
+  - 会从 prServer 自动补齐 `course_code/course_name/repo_type`
+- 支持：`@bot /pr start <课程代码|课程全名|昵称>`
+  - 例：`@bot /pr start 自动化专业导论`
+  - 说明：课程全名/昵称请尽量不要带空格；若你的仓库名不等于课程代码，请改用 repo_name 写法
+- 兼容旧写法：`@bot /pr start <repo_name> <course_code> <course_name...> <repo_type>`
   - 例：`@bot /pr start AUTO2001 AUTO2001 自动化专业导论 normal`
   - `repo_type`：常用为 `normal` 或 `multi-project`
   - 进入会话后，你可以继续用结构化指令修改，或直接粘贴整段 `readme.toml`

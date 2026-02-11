@@ -10,6 +10,12 @@ def _env(key: str, default: str | None = None) -> str | None:
     value = value.strip()
     return value if value else default
 
+
+def _fallback_dir() -> Path | None:
+    raw = _env("HITSZ_MANAGER_COURSE_FALLBACK_DIR", "") or ""
+    raw = raw.strip()
+    return Path(raw).expanduser() if raw else None
+
 class Config(BaseModel):
     # --- 基础路径配置 ---
     # 假设运行目录在项目根目录
@@ -18,6 +24,10 @@ class Config(BaseModel):
     # 课程数据路径
     COURSE_DIR: Path = DATA_ROOT / "courses"
     REPO_DIR: Path = COURSE_DIR / (_env("HITSZ_MANAGER_COURSE_REPO_DIR", "Allrepo-temp") or "Allrepo-temp")
+
+    # 可选：课程数据备份兜底目录（只读亦可）。当 COURSE_DIR 中找不到可用 toml 时，会从这里补充。
+    # 典型用法：把宿主机的精简 readme.toml 目录挂载到容器 /seed/courses，然后设置本变量。
+    COURSE_FALLBACK_DIR: Path | None = _fallback_dir()
     
     # RAG 相关路径
     RAG_DOCS_DIR: Path = DATA_ROOT / "rag_docs"    # 放 txt 的地方
@@ -36,6 +46,14 @@ class Config(BaseModel):
     GITHUB_TOKEN: str = _env("HITSZ_MANAGER_GITHUB_TOKEN", "") or ""
     GITHUB_API_BASE: str = _env("HITSZ_MANAGER_GITHUB_API_BASE", "https://api.github.com") or ""
     GIT_SYNC_CONCURRENCY: int = int(_env("HITSZ_MANAGER_GIT_SYNC_CONCURRENCY", "4") or 4)
+
+    # clone 提速：默认浅克隆，仅拉取最近提交；设为 0 可禁用（全量 clone）
+    GIT_CLONE_DEPTH: int = int(_env("HITSZ_MANAGER_GIT_CLONE_DEPTH", "1") or 1)
+
+    # 同步模式：
+    # - git: clone/pull 仓库（默认；兼容历史结构，但国内可能慢）
+    # - toml: 只下载根目录 readme.toml（更快；依赖 GitHub API/Raw，可能受限流影响）
+    GIT_SYNC_MODE: str = (_env("HITSZ_MANAGER_GIT_SYNC_MODE", "git") or "git").strip().lower()
 
     # --- LLM 配置 (Gemini via OneAPI/NewAPI) ---
     # 注意：不要把 key 写进代码。请用环境变量配置：HITSZ_MANAGER_AI_API_KEY

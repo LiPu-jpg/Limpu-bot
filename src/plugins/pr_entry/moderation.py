@@ -27,7 +27,7 @@ _PROMPT = """你是一个内容合规审核员。请审核用户提交的 readme
 - 不包含任何 token/key/secret（例如以 sk- 开头的 key、GitHub token 等）
 - 不包含引导违规或危险行为的内容
 
-输入是 TOML 文本，你只输出严格 JSON（不要 Markdown），结构如下：
+输入是 TOML 文本，你只输出严格 JSON（不要 Markdown，也不要代码块格式），结构如下：
 {
   "approved": true/false,
   "reason": "一句话说明原因",
@@ -41,12 +41,29 @@ _PROMPT = """你是一个内容合规审核员。请审核用户提交的 readme
 def _client() -> ChatOpenAI:
     if not settings.llm_api_key:
         raise RuntimeError("未配置 HITSZ_MANAGER_AI_API_KEY，无法进行内容审核")
-    return ChatOpenAI(
-        openai_api_key=settings.llm_api_key,
-        openai_api_base=settings.llm_base_url,
-        model_name=settings.llm_model,
-        temperature=0,
-    )
+
+    # langchain_openai 不同版本的参数名不一致：有的用 openai_api_key/openai_api_base/model_name，
+    # 有的用 api_key/base_url/model。这里根据可用字段动态映射，且用 **dict 避免类型检查误报。
+    fields = getattr(ChatOpenAI, "model_fields", {}) or {}
+    params: dict[str, Any] = {"temperature": 0}
+
+    if "openai_api_key" in fields:
+        params["openai_api_key"] = settings.llm_api_key
+    elif "api_key" in fields:
+        params["api_key"] = settings.llm_api_key
+
+    if settings.llm_base_url:
+        if "openai_api_base" in fields:
+            params["openai_api_base"] = settings.llm_base_url
+        elif "base_url" in fields:
+            params["base_url"] = settings.llm_base_url
+
+    if "model" in fields:
+        params["model"] = settings.llm_model
+    elif "model_name" in fields:
+        params["model_name"] = settings.llm_model
+
+    return ChatOpenAI(**params)
 
 
 async def moderate_toml(toml_text: str) -> ModerationResult:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
+import re
 
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message
@@ -11,20 +12,22 @@ from nonebot.rule import to_me
 from .moderation import moderate_toml
 from .prserver_client import ensure_pr, get_course_structure, get_course_toml, submit_ops_dry_run
 from .settings import settings
+from ..course_manager.data_loader import course_manager
 
 import tomlkit
-from tomlkit.items import AoT, Array, InlineTable, Table
+from tomlkit.container import Container
+from tomlkit.items import AoT, Array, InlineTable, Table, Trivia
 from tomlkit.toml_document import TOMLDocument
 
 
 @dataclass
 class Pending:
-    repo_name: Optional[str]
-    course_code: str
-    course_name: str
-    repo_type: str
+    repo_name: Optional[str] = None
+    course_code: Optional[str] = None
+    course_name: Optional[str] = None
+    repo_type: Optional[str] = None
 
-    mode: str
+    mode: str = ""
 
     # add/edit by section+index
     section_title: str = ""
@@ -33,11 +36,11 @@ class Pending:
     # modify by paragraph locating
     old_paragraph: str = ""
     new_paragraph: str = ""
-    candidates: list[dict] | None = None
-    target: dict | None = None
+    candidates: Optional[list[dict]] = None
+    target: Optional[dict] = None
 
     # store the TOML we located against (avoid race / re-fetch)
-    base_toml: str = ""
+    base_toml: Optional[str] = None
 
     # attribution
     want_attribution: bool | None = None
@@ -52,7 +55,9 @@ _PENDING: dict[tuple[int | None, int], Pending] = {}
 
 
 def _key(event: MessageEvent) -> tuple[int | None, int]:
-    return (getattr(event, "group_id", None), int(event.user_id))
+    group_id = getattr(event, "group_id", None)
+    user_id = int(getattr(event, "user_id", 0))
+    return (group_id, user_id)
 
 
 def _allowed(event: MessageEvent) -> bool:
@@ -62,7 +67,9 @@ def _allowed(event: MessageEvent) -> bool:
 
 
 def _text(event: MessageEvent) -> str:
-    return str(event.get_message()).strip()
+    # Use plaintext so a message like "[at:qq=xxx]" is treated as empty.
+    # This improves interaction when users only @bot.
+    return (event.get_plaintext() or "").strip()
 
 
 def _author_name(event: MessageEvent) -> str:
@@ -148,7 +155,7 @@ def _split_long_text(text: str, *, limit: int = 1800) -> list[str]:
 async def _send_forward(bot: Bot, event: MessageEvent, nodes: list[dict]) -> bool:
     try:
         if getattr(event, "group_id", None):
-            await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=nodes)
+            await bot.call_api("send_group_forward_msg", group_id=getattr(event, "group_id", None), messages=nodes)
         else:
             await bot.call_api("send_private_forward_msg", user_id=event.user_id, messages=nodes)
         return True
@@ -156,10 +163,15 @@ async def _send_forward(bot: Bot, event: MessageEvent, nodes: list[dict]) -> boo
         return False
 
 
-def _doc_table(doc: object) -> Table | TOMLDocument:
-    if not isinstance(doc, (Table, TOMLDocument)):
-        raise ValueError("invalid TOML doc")
-    return doc
+def _doc_table(doc: object) -> Table:
+    if isinstance(doc, TOMLDocument):
+        table = Table(Container(), Trivia(), is_aot_element=False)
+        for key, value in doc.items():
+            table[key] = value
+        return table
+    if isinstance(doc, Table):
+        return doc
+    raise ValueError("invalid TOML doc")
 
 
 def _aot(v: object) -> AoT | None:
@@ -174,6 +186,165 @@ def _safe_str(v: object) -> str:
 
 def _norm_text(s: str) -> str:
     return (s or "").strip().replace("\r\n", "\n")
+
+
+def _toml_multiline(s: str):
+    s2 = _norm_text(s)
+    return tomlkit.string(s2, multiline=True)
+
+
+def _append_toml_by_target(
+    base_toml: str,
+    *,
+    target: dict,
+    content: str = "",
+    author: dict | None = None,
+) -> str:
+    """对 multi-project TOML 做追加类修改（本地 patch，不依赖 prServer submit_ops）。"""
+
+    doc = _doc_table(tomlkit.parse(base_toml))
+
+    t = str((target or {}).get("type") or "").strip()
+    if t not in {"append_course", "append_course_section_item", "append_course_teacher_review"}:
+        raise ValueError(f"unsupported append target type: {t}")
+
+    courses = _aot(doc.get("courses"))
+    if courses is None:
+        raise ValueError("multi-project: courses 不存在")
+
+    if t == "append_course":
+        name = str(target.get("course_name") or "").strip()
+        if not name:
+            raise ValueError("course_name 不能为空")
+        for c in courses:
+            if isinstance(c, Table) and _safe_str(c.get("name")).strip() == name:
+                raise ValueError("已存在同名子课程")
+
+        c = tomlkit.table()
+        c.add("name", name)
+        c.add("code", str(target.get("code") or ""))
+        courses.append(c)
+        return tomlkit.dumps(doc).rstrip() + "\n"
+
+    course_name = str(target.get("course_name") or "").strip()
+    if not course_name:
+        raise ValueError("course_name 不能为空")
+
+    course_tbl: Table | None = None
+    for c in courses:
+        if isinstance(c, Table) and _safe_str(c.get("name")).strip() == course_name:
+            course_tbl = c
+            break
+    if course_tbl is None:
+        raise ValueError("未找到指定子课程")
+
+    if t == "append_course_section_item":
+        section_title = str(target.get("section") or "").strip()
+        if not section_title:
+            raise ValueError("section 不能为空")
+
+        secs = _aot(course_tbl.get("sections"))
+        if secs is None:
+            secs = AoT([])
+            course_tbl["sections"] = secs
+
+        sec_tbl: Table | None = None
+        for sec in secs:
+            if isinstance(sec, Table) and _safe_str(sec.get("title")).strip() == section_title:
+                sec_tbl = sec
+                break
+        if sec_tbl is None:
+            sec_tbl = tomlkit.table()
+            sec_tbl.add("title", section_title)
+            sec_tbl.add("items", AoT([]))
+            secs.append(sec_tbl)
+
+        items = _aot(sec_tbl.get("items"))
+        if items is None:
+            items = AoT([])
+            sec_tbl["items"] = items
+
+        it = tomlkit.table()
+        it.add("content", _toml_multiline(content))
+        if author:
+            _append_author_field(it, author)
+        items.append(it)
+        return tomlkit.dumps(doc).rstrip() + "\n"
+
+    # append_course_teacher_review
+    teacher = str(target.get("teacher") or "").strip()
+    if not teacher:
+        raise ValueError("teacher 不能为空")
+
+    teachers = _aot(course_tbl.get("teachers"))
+    if teachers is None:
+        teachers = AoT([])
+        course_tbl["teachers"] = teachers
+
+    t_tbl: Table | None = None
+    for tt in teachers:
+        if isinstance(tt, Table) and _safe_str(tt.get("name")).strip() == teacher:
+            t_tbl = tt
+            break
+    if t_tbl is None:
+        t_tbl = tomlkit.table()
+        t_tbl.add("name", teacher)
+        t_tbl.add("reviews", AoT([]))
+        teachers.append(t_tbl)
+
+    reviews = _aot(t_tbl.get("reviews"))
+    if reviews is None:
+        reviews = AoT([])
+        t_tbl["reviews"] = reviews
+
+    rv = tomlkit.table()
+    rv.add("content", _toml_multiline(content))
+    if author:
+        _append_author_field(rv, author)
+    reviews.append(rv)
+    return tomlkit.dumps(doc).rstrip() + "\n"
+
+
+def _append_normal_lecturer_review(
+    base_toml: str,
+    *,
+    lecturer: str,
+    content: str,
+    author: dict | None,
+) -> str:
+    doc = _doc_table(tomlkit.parse(base_toml))
+
+    name = (lecturer or "").strip()
+    if not name:
+        raise ValueError("lecturer 不能为空")
+
+    lecturers = _aot(doc.get("lecturers"))
+    if lecturers is None:
+        lecturers = AoT([])
+        doc["lecturers"] = lecturers
+
+    lec_tbl: Table | None = None
+    for lec in lecturers:
+        if isinstance(lec, Table) and _safe_str(lec.get("name")).strip() == name:
+            lec_tbl = lec
+            break
+    if lec_tbl is None:
+        lec_tbl = tomlkit.table()
+        lec_tbl.add("name", name)
+        lec_tbl.add("reviews", AoT([]))
+        lecturers.append(lec_tbl)
+
+    reviews = _aot(lec_tbl.get("reviews"))
+    if reviews is None:
+        reviews = AoT([])
+        lec_tbl["reviews"] = reviews
+
+    rv = tomlkit.table()
+    rv.add("content", _toml_multiline(content))
+    if author:
+        _append_author_field(rv, author)
+    reviews.append(rv)
+    return tomlkit.dumps(doc).rstrip() + "\n"
 
 
 def _append_author_field(target: Table, author: dict) -> None:
@@ -209,6 +380,17 @@ def _append_author_field(target: Table, author: dict) -> None:
         target["author"] = arr
         return
     target["author"] = t
+
+
+def _extract_segments(doc):
+    repo_type = getattr(doc, "repo_type", "")  # 从doc中获取repo_type
+    if isinstance(doc, Table):
+        return _extract_multi_segments(doc) if repo_type == "multi-project" else _extract_normal_segments(doc)
+    elif isinstance(doc, TOMLDocument):
+        table = _doc_table(doc)  # 使用_doc_table将TOMLDocument转换为Table
+        return _extract_multi_segments(table) if repo_type == "multi-project" else _extract_normal_segments(table)
+    else:
+        raise TypeError("doc must be of type Table or TOMLDocument")
 
 
 def _extract_normal_segments(doc: Table) -> list[tuple[str, str]]:
@@ -306,7 +488,7 @@ def _extract_multi_segments(doc: Table) -> list[tuple[str, str]]:
 
 def build_forward_nodes_from_toml(bot: Bot, toml_text: str) -> list[dict]:
     doc = _doc_table(tomlkit.parse(toml_text))
-    repo_type = _safe_str(doc.get("repo_type")).strip() or "normal"
+    repo_type = getattr(doc, "repo_type", "")
 
     segs = _extract_multi_segments(doc) if repo_type == "multi-project" else _extract_normal_segments(doc)
     nodes: list[dict] = []
@@ -343,7 +525,7 @@ def _find_paragraph_candidates(toml_text: str, snippet: str) -> list[dict]:
         return []
 
     doc = _doc_table(tomlkit.parse(toml_text))
-    repo_type = _safe_str(doc.get("repo_type")).strip() or "normal"
+    repo_type = getattr(doc, "repo_type", "")
 
     out: list[dict] = []
 
@@ -609,20 +791,69 @@ def _format_structure(summary: dict) -> str:
     return "\n".join(lines)
 
 
-matcher = on_message(rule=to_me(), priority=50)
+matcher = on_message(rule=to_me(), priority=100)
+
+
+def _is_repo_type(s: str) -> bool:
+    v = (s or "").strip().lower()
+    return v in {"normal", "multi-project"}
+
+
+def _extract_meta_from_summary(summary: dict | None) -> tuple[str, str, str]:
+    meta = (summary or {}).get("meta") or {}
+    course_code = str(meta.get("course_code") or "").strip()
+    course_name = str(meta.get("course_name") or "").strip()
+    repo_type = str(meta.get("repo_type") or "").strip()
+    return course_code, course_name, repo_type
 
 
 @matcher.handle()
 async def _(bot: Bot, event: MessageEvent):
     text = _text(event)
+    # 容错：有些客户端会输入“/ pr show”（/ 后多空格）或多空格。
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = re.sub(r"^/\s+", "/", text)
+
+    # 检测是否仅仅是 @ 机器人
+    if not text.strip():
+        await matcher.finish(
+            "🎓 你好！我是 HITSZ 课程助理 Hoa_Anon酱\n"
+            "找课程请记得 @我 并使用以下指令：\n"
+            "━━━━━━━━━━━━━━\n"
+            "【课程查询】\n"
+            "- /搜 <关键词>：模糊搜索课程\n"
+            "- /查 <课程代码|全名|昵称>：查看详细评价（合并转发）\n"
+            "- /设置昵称 <昵称> <课程代码>：绑定昵称\n"
+            "- /刷：拉取课程仓库并更新数据\n"
+            "━━━━━━━━━━━━━━\n"
+            "【问答（RAG）】\n"
+            "- /重构知识库：重建向量库（较耗资源，建议低峰使用）\n"
+            "- /问 <问题>：基于知识库问答\n"
+            "━━━━━━━━━━━━━━\n"
+            "【PR 提交】\n"
+            "- /pr help：查看流程说明\n"
+            "- /pr start <repo> <code> <name...> <repo_type>：进入会话\n"
+            "- /pr show：展示 readme.toml（分段合并转发）\n"
+            "- /pr add：追加内容；/pr edit：按序号修改；/pr modify：按原段落定位修改\n"
+            "- /pr cancel：取消当前会话\n"
+            "━━━━━━━━━━━━━━\n"
+            "🌐 网页版：https://v3.hoa.moe"
+        )
 
     # 命令：/pr help
     if text in {"/pr", "/pr help", "pr", "pr help"}:
         await matcher.finish(
             "PR 提交（最小闭环）\n"
-            "1) /pr start AUTO2001 AUTO2001 自动化专业导论 normal\n"
+            "1) /pr start AUTO2001  （推荐：只填仓库/课程代码）\n"
+            "   或 /pr start 自动化专业导论  （支持：课程全名/昵称/课程代码；若能解析到代码则自动补全）\n"
+            "   multi-project 子课程也支持：/pr start <子课程名>（会自动定位到父仓库并选中该子课程）\n"
+            "   兼容老写法：/pr start <repo_name> <course_code> <course_name...> <repo_type>\n"
             "2) /pr show 以合并转发方式展示全文（按主题分段，超长自动拆分）\n"
             "3) 添加：/pr add <章节标题>（可省略标题，按提示输入）\n"
+            "   multi-project：可先 /pr target <子课程名>，再 /pr add <章节标题>；或直接 /pr add <子课程名> <章节标题>\n"
+            "   normal：/pr addreview <教师名>（追加教师评价）\n"
+            "   multi-project：/pr addreview <子课程名> <教师名>（追加教师评价）\n"
+            "   multi-project：/pr addcourse <子课程名> [课程代码]（新增一门子课程）\n"
             "4) 修改：/pr modify（按提示先发原段落，再发修改后的段落）\n"
             "5) Bot 会先做合规审核，通过后 ensure PR（已有 PR 会更新）\n\n"
             "取消：/pr cancel"
@@ -633,37 +864,133 @@ async def _(bot: Bot, event: MessageEvent):
         _PENDING.pop(_key(event), None)
         await matcher.finish("已取消本次 PR 提交流程")
 
-    # 命令：/pr start <repo> <code> <name...> [repo_type]
+    # 命令：/pr start
+    # 新版（简化）：
+    # - /pr start <repo_name>
+    # - /pr start <课程代码|全名|昵称>
+    # 兼容老版：/pr start <repo_name> <course_code> <course_name...> <repo_type>
     if text.startswith("/pr start ") or text.startswith("pr start "):
         if not _allowed(event):
             await matcher.finish("你没有权限发起 PR（管理员未授权）")
 
         parts = text.split()
-        if len(parts) < 5:
-            await matcher.finish("用法：/pr start <repo_name> <course_code> <course_name> <repo_type>")
+        args = parts[2:]
+        if not args:
+            await matcher.finish(
+                "用法：\n"
+                "- /pr start <repo_name>\n"
+                "- /pr start <课程代码|全名|昵称>\n"
+                "- （兼容）/pr start <repo_name> <course_code> <course_name...> <repo_type>"
+            )
 
-        repo_name = parts[2]
-        course_code = parts[3]
-        repo_type = parts[-1]
-        course_name = " ".join(parts[4:-1]).strip()
-        if not course_name:
-            await matcher.finish("course_name 不能为空")
+        repo_name = ""
+        course_code = ""
+        course_name = ""
+        repo_type = ""
+
+        # legacy: /pr start <repo_name> <course_code> <course_name...> <repo_type>
+        if len(args) >= 4:
+            repo_name = args[0].strip()
+            course_code = args[1].strip()
+            course_name = " ".join(args[2:-1]).strip()
+            repo_type = args[-1].strip()
+        else:
+            key = args[0].strip()
+            maybe_type = args[1].strip() if len(args) >= 2 else ""
+            if maybe_type and not _is_repo_type(maybe_type):
+                await matcher.finish(
+                    "用法：/pr start <repo_name> [repo_type]\n"
+                    "或：/pr start <课程代码|全名|昵称> [repo_type]（课程全名/昵称请不要带空格）"
+                )
+
+            # (A) 优先把 key 当 repo_name：从 prServer 自动补齐 code/name/type
+            repo_name = key
+            if maybe_type:
+                repo_type = maybe_type
+
+            s = await get_course_structure(repo_name=repo_name)
+            if s.ok and s.data and isinstance(s.data.get("summary"), dict):
+                cc, cn, rt = _extract_meta_from_summary(s.data.get("summary"))
+                course_code = cc or course_code
+                course_name = cn or course_name
+                repo_type = repo_type or rt
+            else:
+                # (B) 再把 key 当“课程代码/全名/昵称”：从本地 course_manager 解析到 code/name
+                course = course_manager.get_course_detail(key)
+                if course:
+                    schema = str(course.get("_schema") or "")
+                    if schema == "multi-project-item":
+                        parent = course.get("_parent") if isinstance(course, dict) else None
+                        if not isinstance(parent, dict):
+                            await matcher.finish(
+                                "该课程属于 multi-project 仓库，但缺少父仓库信息，无法自动定位 repo_name。\n"
+                                "请用完整写法：/pr start <repo_name> <course_code> <course_name...> multi-project"
+                            )
+
+                        # 父仓库的 course_code 通常就是 repo_name
+                        p_code = str(parent.get("course_code") or "").strip()
+                        p_name = str(parent.get("course_name") or "").strip()
+                        p_type = str(parent.get("repo_type") or "").strip() or "multi-project"
+                        repo_name = p_code or repo_name or key
+                        course_code = p_code or course_code
+                        course_name = p_name or course_name
+                        repo_type = repo_type or p_type
+
+                        # 记住选中的子课程，后续 /pr add 可省略子课程名
+                        sub_name = str(course.get("course_name") or "").strip() or key
+                        _PENDING[_key(event)] = Pending(
+                            repo_name=repo_name,
+                            course_code=course_code,
+                            course_name=course_name,
+                            repo_type=repo_type,
+                            mode="idle",
+                            target={"type": "multi-project-course", "course_name": sub_name},
+                        )
+                        await matcher.finish(
+                            "已进入 PR 提交流程（multi-project）。\n"
+                            f"当前选中子课程：{sub_name}\n"
+                            "- 用 /pr show 查看当前仓库内容\n"
+                            "- 用 /pr target 切换子课程\n"
+                            "- 用 /pr add 或 /pr modify 编辑\n"
+                            "- 编辑完成后按提示确认提交"
+                        )
+
+                    course_code = str(course.get("course_code") or "").strip()
+                    course_name = str(course.get("course_name") or "").strip()
+                    repo_type = repo_type or str(course.get("repo_type") or "").strip() or "normal"
+                    if not repo_name:
+                        repo_name = course_code
+                    # 约定：大多数仓库名与 course_code 一致；若你的实际 repo_name 不一致，请用 /pr start <repo_name>
+                    if repo_name == key:
+                        repo_name = course_code or key
+
+        repo_name = (repo_name or "").strip()
+        course_code = (course_code or "").strip()
+        course_name = (course_name or "").strip()
+        repo_type = (repo_type or "").strip() or "normal"
+
+        if not repo_name:
+            await matcher.finish("缺少 repo_name，请重试：/pr start <repo_name>")
+        if not course_code or not course_name:
+            await matcher.finish(
+                "无法自动补齐 course_code/course_name。\n"
+                "如果是新仓库或仓库名不等于课程代码，请用完整写法：\n"
+                "/pr start <repo_name> <course_code> <course_name...> <repo_type>"
+            )
 
         _PENDING[_key(event)] = Pending(
             repo_name=repo_name,
             course_code=course_code,
             course_name=course_name,
             repo_type=repo_type,
-            mode="full_toml",
+            mode="idle",
         )
 
         await matcher.finish(
             "已进入 PR 提交流程。\n"
-            "你可以：\n"
-            "- 用 /pr show 查看全文（合并转发）\n"
-            "- 用 /pr add /pr modify 做结构化修改\n"
-            "- 或直接下一条消息粘贴完整 readme.toml（整段提交）\n\n"
-            "提示：会先做 LLM 合规审核，未通过将拒绝提交。"
+            "- 用 /pr show 查看当前仓库内容\n"
+            "- 用 /pr add 或 /pr modify 编辑\n"
+            "- 编辑完成后按提示确认提交"
         )
 
     # 命令：/pr show（查看结构）
@@ -673,7 +1000,11 @@ async def _(bot: Bot, event: MessageEvent):
             await matcher.finish("请先 /pr start 进入流程")
 
         await matcher.send("正在拉取内容并合并转发展示...")
-        r = await get_course_toml(repo_name=pending.repo_name or pending.course_code)
+        repo_key = (pending.repo_name or pending.course_code or "").strip()
+        if not repo_key:
+            await matcher.finish("缺少仓库标识（repo_name/course_code），请重新 /pr start")
+
+        r = await get_course_toml(repo_name=repo_key)
         if not r.ok or not r.toml:
             await matcher.finish(f"拉取失败：{r.message}")
 
@@ -687,16 +1018,177 @@ async def _(bot: Bot, event: MessageEvent):
             await matcher.finish("发送合并转发失败（可能风控/版本问题）。你可以改用直接粘贴整段 TOML 提交。")
 
         # Also provide a short summary for navigation
-        s = await get_course_structure(repo_name=pending.repo_name or pending.course_code)
+        s = await get_course_structure(repo_name=repo_key)
         if s.ok and s.data and isinstance(s.data.get("summary"), dict):
             await matcher.finish(_format_structure(s.data["summary"]))
         await matcher.finish("已展示。你可以 /pr add 或 /pr modify 继续。")
+
+    # 命令：/pr target <子课程名>（multi-project 选择子课程）
+    if text.startswith("/pr target ") or text.startswith("pr target "):
+        pending = _PENDING.get(_key(event))
+        if not pending:
+            await matcher.finish("请先 /pr start 进入流程")
+        if (pending.repo_type or "").strip() != "multi-project":
+            await matcher.finish("该命令仅适用于 multi-project 仓库")
+
+        course_name = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) >= 3 else ""
+        if not course_name:
+            await matcher.finish("用法：/pr target <子课程名>")
+
+        _PENDING[_key(event)] = Pending(
+            repo_name=pending.repo_name,
+            course_code=pending.course_code,
+            course_name=pending.course_name,
+            repo_type=pending.repo_type,
+            mode="idle",
+            target={"type": "multi-project-course", "course_name": course_name},
+        )
+        await matcher.finish(f"已切换当前子课程：{course_name}")
+
+    # 命令：/pr addcourse <子课程名>（multi-project 新增一门子课程）
+    if text.startswith("/pr addcourse ") or text.startswith("pr addcourse "):
+        pending = _PENDING.get(_key(event))
+        if not pending:
+            await matcher.finish("请先 /pr start 进入流程")
+        if (pending.repo_type or "").strip() != "multi-project":
+            await matcher.finish("该命令仅适用于 multi-project 仓库")
+
+        parts = text.split()
+        if len(parts) < 3:
+            await matcher.finish("用法：/pr addcourse <子课程名> [课程代码]")
+        course_name = parts[2].strip() if len(parts) >= 3 else ""
+        code = parts[3].strip() if len(parts) >= 4 else ""
+        if not course_name:
+            await matcher.finish("用法：/pr addcourse <子课程名> [课程代码]")
+
+        _PENDING[_key(event)] = Pending(
+            repo_name=pending.repo_name,
+            course_code=pending.course_code,
+            course_name=pending.course_name,
+            repo_type=pending.repo_type,
+            mode="build_patch",
+            target={"type": "append_course", "course_name": course_name, "code": code},
+            want_attribution=False,
+            new_paragraph="",
+        )
+        await matcher.send("正在生成修改后的 TOML...")
+        # fallthrough to build_patch below
+
+    # 命令：/pr addreview
+    # - multi-project：/pr addreview <子课程名> <教师名>
+    # - normal：/pr addreview <教师名>
+    if text.startswith("/pr addreview ") or text.startswith("pr addreview "):
+        pending = _PENDING.get(_key(event))
+        if not pending:
+            await matcher.finish("请先 /pr start 进入流程")
+
+        parts = text.split()
+        repo_type = (pending.repo_type or "").strip()
+        if repo_type == "multi-project":
+            if len(parts) < 4:
+                await matcher.finish("用法：/pr addreview <子课程名> <教师名>")
+            course_name = parts[2].strip()
+            teacher = " ".join(parts[3:]).strip()
+            if not course_name or not teacher:
+                await matcher.finish("用法：/pr addreview <子课程名> <教师名>")
+
+            _PENDING[_key(event)] = Pending(
+                repo_name=pending.repo_name,
+                course_code=pending.course_code,
+                course_name=pending.course_name,
+                repo_type=pending.repo_type,
+                mode="add_content",
+                target={
+                    "type": "append_course_teacher_review",
+                    "course_name": course_name,
+                    "teacher": teacher,
+                },
+            )
+            await matcher.finish(
+                f"将向子课程《{course_name}》教师《{teacher}》追加一条评价。\n"
+                "请下一条消息发送要添加的正文（不要带多余解释）。"
+            )
+
+        # normal
+        if len(parts) < 3:
+            await matcher.finish("用法：/pr addreview <教师名>")
+        lecturer = " ".join(parts[2:]).strip()
+        if not lecturer:
+            await matcher.finish("用法：/pr addreview <教师名>")
+
+        _PENDING[_key(event)] = Pending(
+            repo_name=pending.repo_name,
+            course_code=pending.course_code,
+            course_name=pending.course_name,
+            repo_type=pending.repo_type,
+            mode="add_content",
+            target={"type": "append_lecturer_review", "lecturer": lecturer},
+        )
+        await matcher.finish(
+            f"将向教师《{lecturer}》追加一条评价。\n"
+            "请下一条消息发送要添加的正文（不要带多余解释）。"
+        )
 
     # 命令：/pr add <章节标题>
     if text.startswith("/pr add ") or text.startswith("pr add "):
         pending = _PENDING.get(_key(event))
         if not pending:
             await matcher.finish("请先 /pr start 进入流程")
+
+        # multi-project：支持
+        # - /pr add <子课程名> <章节标题>
+        # - /pr add <章节标题>（需先 /pr target 或 /pr start 已选中子课程）
+        if (pending.repo_type or "").strip() == "multi-project":
+            parts = text.split()
+            args = parts[2:]
+            if not args:
+                await matcher.finish(
+                    "用法：\n"
+                    "- /pr add <子课程名> <章节标题>\n"
+                    "- 或先 /pr target <子课程名>，再 /pr add <章节标题>"
+                )
+
+            course_name = ""
+            section_title = ""
+            if len(args) >= 2:
+                course_name = args[0].strip()
+                section_title = " ".join(args[1:]).strip()
+            else:
+                # len(args) == 1
+                t = pending.target or {}
+                if isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course":
+                    course_name = str(t.get("course_name") or "").strip()
+                    section_title = " ".join(args).strip()
+                else:
+                    await matcher.finish(
+                        "multi-project 需要先指定子课程：\n"
+                        "- /pr add <子课程名> <章节标题>\n"
+                        "- 或 /pr target <子课程名> 后再 /pr add <章节标题>"
+                    )
+
+            if not course_name or not section_title:
+                await matcher.finish(
+                    "用法：\n"
+                    "- /pr add <子课程名> <章节标题>\n"
+                    "- 或先 /pr target <子课程名>，再 /pr add <章节标题>"
+                )
+
+            _PENDING[_key(event)] = Pending(
+                repo_name=pending.repo_name,
+                course_code=pending.course_code,
+                course_name=pending.course_name,
+                repo_type=pending.repo_type,
+                mode="add_content",
+                target={
+                    "type": "append_course_section_item",
+                    "course_name": course_name,
+                    "section": section_title,
+                },
+            )
+            await matcher.finish(
+                f"将向子课程《{course_name}》章节《{section_title}》追加一条内容。\n"
+                "请下一条消息发送要添加的正文（不要带多余解释）。"
+            )
 
         section_title = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) >= 3 else ""
         if section_title:
@@ -719,6 +1211,12 @@ async def _(bot: Bot, event: MessageEvent):
             course_name=pending.course_name,
             repo_type=pending.repo_type,
             mode="add_section",
+            section_title=pending.section_title or "",
+            item_index=pending.item_index or -1,
+            old_paragraph=pending.old_paragraph or "",
+            new_paragraph=pending.new_paragraph or "",
+            target=pending.target or None,
+            base_toml=pending.base_toml or None,
         )
         await matcher.finish("请发送要追加到的章节标题（已有标题或新建标题均可）。")
 
@@ -783,7 +1281,7 @@ async def _(bot: Bot, event: MessageEvent):
     default_author_name = _author_name(event)
 
     # full TOML flow
-    if pending.mode == "full_toml":
+    if getattr(pending, "mode", None) == "full_toml":
         toml_text = text
         if not toml_text or len(toml_text) < 20:
             await matcher.finish("TOML 内容太短，请重新粘贴完整 readme.toml")
@@ -795,24 +1293,32 @@ async def _(bot: Bot, event: MessageEvent):
             await matcher.finish(f"审核未通过：{mod.reason}")
 
         await matcher.send("审核通过，正在提交并确保 PR...")
-        result = await ensure_pr(
-            repo_name=pending.repo_name,
-            course_code=pending.course_code,
-            course_name=pending.course_name,
-            repo_type=pending.repo_type,
+        repo_name: str | None = (pending.repo_name or "").strip() or (pending.course_code or "").strip() or None
+        course_code = (pending.course_code or "").strip()
+        course_name = (pending.course_name or "").strip()
+        repo_type = (pending.repo_type or "").strip()
+
+        if not course_code or not course_name or not repo_type:
+            await matcher.finish("缺少必要的仓库或课程信息，无法继续。")
+
+        r = await ensure_pr(
+            repo_name=repo_name,
+            course_code=course_code,
+            course_name=course_name,
+            repo_type=repo_type,
             toml_text=toml_text,
         )
         _PENDING.pop(_key(event), None)
-        if not result.ok:
-            await matcher.finish(f"提交失败：{result.message}")
-        if result.pr_url:
-            await matcher.finish(f"已创建/更新 PR：{result.pr_url}")
-        if result.request_id:
-            await matcher.finish(f"仓库不存在，已进入 pending：request_id={result.request_id}")
-        await matcher.finish(f"提交完成：{result.message}")
+        if not r.ok:
+            await matcher.finish(f"提交失败：{r.message}")
+        if r.pr_url:
+            await matcher.finish(f"已创建/更新 PR：{r.pr_url}")
+        if r.request_id:
+            await matcher.finish(f"仓库不存在，已进入 pending：request_id={r.request_id}")
+        await matcher.finish(f"提交完成：{r.message}")
 
     # collect section title for add
-    if pending.mode == "add_section":
+    if getattr(pending, "mode", None) == "add_section":
         section_title = text.strip()
         if not section_title:
             await matcher.finish("章节标题不能为空，请重新发送")
@@ -827,13 +1333,18 @@ async def _(bot: Bot, event: MessageEvent):
         await matcher.finish(f"将向章节《{section_title}》追加一条内容。请下一条消息发送正文。")
 
     # modify: receive old paragraph
-    if pending.mode == "modify_old":
+    if getattr(pending, "mode", None) == "modify_old":
         old = text.strip()
         if len(old) < 10:
             await matcher.finish("原段落太短，建议复制更长一点的原文再试")
 
         await matcher.send("正在从仓库 TOML 中定位该段落...")
-        r = await get_course_toml(repo_name=pending.repo_name or pending.course_code)
+        repo_key2 = (pending.repo_name or pending.course_code or "").strip()
+        if not repo_key2:
+            _PENDING.pop(_key(event), None)
+            await matcher.finish("缺少仓库标识（repo_name/course_code），请重新 /pr start")
+
+        r = await get_course_toml(repo_name=repo_key2)
         if not r.ok or not r.toml:
             _PENDING.pop(_key(event), None)
             await matcher.finish(f"拉取 TOML 失败：{r.message}")
@@ -924,7 +1435,7 @@ async def _(bot: Bot, event: MessageEvent):
         )
         await matcher.finish("\n".join(lines))
 
-    if pending.mode == "modify_choose":
+    if getattr(pending, "mode", None) == "modify_choose":
         if not pending.candidates:
             _PENDING.pop(_key(event), None)
             await matcher.finish("状态异常：请重新 /pr modify")
@@ -972,7 +1483,7 @@ async def _(bot: Bot, event: MessageEvent):
             )
         await matcher.finish("已选择目标。请下一条消息发送修改后的完整正文。")
 
-    if pending.mode == "modify_new":
+    if getattr(pending, "mode", None) == "modify_new":
         new = text.strip()
         if not new:
             await matcher.finish("修改后的正文不能为空")
@@ -993,7 +1504,7 @@ async def _(bot: Bot, event: MessageEvent):
         await matcher.finish("是否在该条目 author 中留名？回复 y/n")
 
     # add/edit flow (by title/index): ask attribution after receiving content
-    if pending.mode in {"add_content", "edit_content"}:
+    if getattr(pending, "mode", None) in {"add_content", "edit_content"}:
         content = text.strip()
         if not content:
             await matcher.finish("内容不能为空，请重新发送")
@@ -1006,10 +1517,12 @@ async def _(bot: Bot, event: MessageEvent):
             section_title=pending.section_title,
             item_index=pending.item_index,
             new_paragraph=content,
+            target=pending.target,
+            base_toml=pending.base_toml,
         )
         await matcher.finish("是否在该条目 author 中留名？回复 y/n")
 
-    if pending.mode == "attrib_ask":
+    if getattr(pending, "mode", None) == "attrib_ask":
         ans = text.strip().lower()
         if ans in {"y", "yes", "是", "要", "留", "留名"}:
             _PENDING[_key(event)] = Pending(
@@ -1027,8 +1540,8 @@ async def _(bot: Bot, event: MessageEvent):
                 want_attribution=True,
             )
             await matcher.finish(f"请输入显示名字（直接回车则用：{default_author_name}）")
-        if ans in {"n", "no", "否", "不要", "不留"}:
-            _PENDING[_key(event)] = Pending(
+        elif ans in {"n", "no", "否", "不要", "不留"}:
+            pending = Pending(
                 repo_name=pending.repo_name,
                 course_code=pending.course_code,
                 course_name=pending.course_name,
@@ -1042,13 +1555,13 @@ async def _(bot: Bot, event: MessageEvent):
                 base_toml=pending.base_toml,
                 want_attribution=False,
             )
+            _PENDING[_key(event)] = pending
             await matcher.send("好的，不留名。")
             # fallthrough to build_patch below
-            pending = _PENDING.get(_key(event))  # refresh local state
         else:
             await matcher.finish("请回复 y 或 n")
 
-    if pending.mode == "attrib_name":
+    if getattr(pending, "mode", None) == "attrib_name":
         name = text.strip() or default_author_name
         _PENDING[_key(event)] = Pending(
             repo_name=pending.repo_name,
@@ -1067,9 +1580,9 @@ async def _(bot: Bot, event: MessageEvent):
         )
         await matcher.finish("可选：请输入你的主页链接（GitHub/博客等），留空则不填")
 
-    if pending.mode == "attrib_link":
+    if getattr(pending, "mode", None) == "attrib_link":
         link = text.strip()
-        _PENDING[_key(event)] = Pending(
+        pending = Pending(
             repo_name=pending.repo_name,
             course_code=pending.course_code,
             course_name=pending.course_name,
@@ -1085,72 +1598,127 @@ async def _(bot: Bot, event: MessageEvent):
             author_name=pending.author_name,
             author_link=link,
         )
+        _PENDING[_key(event)] = pending
         await matcher.send("收到。")
         # fallthrough to build_patch below
-        pending = _PENDING.get(_key(event))  # refresh local state
 
-    if pending.mode == "build_patch":
+    if getattr(pending, "mode", None) == "build_patch":
         author = None
-        if pending.want_attribution:
+        if getattr(pending, "want_attribution", False):
             author = {
-                "name": pending.author_name or default_author_name,
-                "link": pending.author_link or "",
+                "name": getattr(pending, "author_name", default_author_name),
+                "link": getattr(pending, "author_link", ""),
                 "date": _year_month(),
             }
 
-        # determine op based on what we have
-        if pending.old_paragraph and pending.target:
-            ttype = str(pending.target.get("type") or "")
+        # append operations are patched locally (prServer submit_ops 不支持这些追加类操作)
+        ttype0 = str(((pending.target or {}) if isinstance(pending.target, dict) else {}).get("type") or "")
+        if ttype0 in {"append_course", "append_course_section_item", "append_course_teacher_review", "append_lecturer_review"}:
+            repo_key = (getattr(pending, "repo_name", "") or getattr(pending, "course_code", "") or "").strip()
+            if not repo_key:
+                _PENDING.pop(_key(event), None)
+                await matcher.finish("缺少仓库标识（repo_name/course_code），请重新 /pr start")
+
+            r0 = await get_course_toml(repo_name=repo_key)
+            if not r0.ok or not r0.toml:
+                _PENDING.pop(_key(event), None)
+                await matcher.finish(f"拉取失败：{r0.message}")
+
+            try:
+                if ttype0 == "append_lecturer_review":
+                    patched_toml = _append_normal_lecturer_review(
+                        r0.toml,
+                        lecturer=str((getattr(pending, "target", {}) or {}).get("lecturer") or "").strip(),
+                        content=getattr(pending, "new_paragraph", "") or "",
+                        author=author,
+                    )
+                else:
+                    patched_toml = _append_toml_by_target(
+                        r0.toml,
+                        target=getattr(pending, "target", {}) or {},
+                        content=getattr(pending, "new_paragraph", "") or "",
+                        author=author,
+                    )
+            except Exception as e:
+                _PENDING.pop(_key(event), None)
+                await matcher.finish(f"生成失败：{e}")
+
+            new_preview = (getattr(pending, "new_paragraph", "") or "").strip()
+            if new_preview and len(new_preview) > 200:
+                new_preview = new_preview[:199] + "…"
+
+            _PENDING[_key(event)] = Pending(
+                repo_name=getattr(pending, "repo_name", ""),
+                course_code=getattr(pending, "course_code", ""),
+                course_name=getattr(pending, "course_name", ""),
+                repo_type=getattr(pending, "repo_type", ""),
+                mode="confirm",
+                new_paragraph=getattr(pending, "new_paragraph", ""),
+                want_attribution=getattr(pending, "want_attribution", False),
+                author_name=getattr(pending, "author_name", ""),
+                author_link=getattr(pending, "author_link", ""),
+                patched_toml=patched_toml,
+                target=getattr(pending, "target", {}) or {},
+            )
+
+            msg = ["即将提交：multi-project 追加".strip()]
+            if new_preview:
+                msg.append(f"\n新增内容（截断）：\n{new_preview}")
+            msg.append("\n回复：确认 / 取消")
+            await matcher.finish("\n".join(msg))
+
+        if getattr(pending, "old_paragraph", None) and getattr(pending, "target", None):
+            ttype = str((pending.target or {}).get("type") or "")
             if ttype == "section_item":
-                fields = {"content": pending.new_paragraph}
+                fields = {"content": getattr(pending, "new_paragraph", "")}
                 if author:
                     fields["author"] = author
                 ops = [
                     {
                         "op": "update_section_item",
-                        "section": pending.section_title,
-                        "index": pending.item_index,
+                        "section": getattr(pending, "section_title", ""),
+                        "index": getattr(pending, "item_index", -1),
                         "fields": fields,
                     }
                 ]
             else:
                 # local patch for targets not supported by submit_ops
-                if not pending.base_toml:
+                if not getattr(pending, "base_toml", None):
                     _PENDING.pop(_key(event), None)
                     await matcher.finish("状态异常：缺少 base TOML，请重新 /pr modify")
                 await matcher.send("正在生成修改后的 TOML...")
                 try:
                     patched_toml = _patch_toml_by_target(
-                        pending.base_toml,
-                        target=pending.target,
-                        old_paragraph=pending.old_paragraph,
-                        new_paragraph=pending.new_paragraph,
+                        getattr(pending, "base_toml", ""),
+                        target=getattr(pending, "target", {}),
+                        old_paragraph=getattr(pending, "old_paragraph", ""),
+                        new_paragraph=getattr(pending, "new_paragraph", ""),
                         author=author,
                     )
                 except Exception as e:
                     await matcher.finish(f"生成失败：{e}")
 
                 _PENDING[_key(event)] = Pending(
-                    repo_name=pending.repo_name,
-                    course_code=pending.course_code,
-                    course_name=pending.course_name,
-                    repo_type=pending.repo_type,
-                    mode="confirm",
-                    section_title=pending.section_title,
-                    item_index=pending.item_index,
-                    old_paragraph=pending.old_paragraph,
-                    new_paragraph=pending.new_paragraph,
-                    want_attribution=pending.want_attribution,
-                    author_name=pending.author_name,
-                    author_link=pending.author_link,
-                    patched_toml=patched_toml,
-                    target=pending.target,
+                    repo_name=getattr(pending, "repo_name", ""),
+                    course_code=getattr(pending, "course_code", ""),
+                    course_name=getattr(pending, "course_name", ""),
+                    repo_type=getattr(pending, "repo_type", ""),
+                    mode="build_patch",
+                    section_title=getattr(pending, "section_title", ""),
+                    item_index=getattr(pending, "item_index", -1),
+                    old_paragraph=getattr(pending, "old_paragraph", ""),
+                    new_paragraph=getattr(pending, "new_paragraph", ""),
+                    target=getattr(pending, "target", {}),
+                    base_toml=getattr(pending, "base_toml", ""),
+                    want_attribution=True,
+                    author_name=getattr(pending, "author_name", ""),
+                    author_link=getattr(pending, "author_link", ""),
                 )
 
-                old_preview = (pending.old_paragraph or "").strip()
+                old_preview = (getattr(pending, "old_paragraph", "") or "").strip()
                 if old_preview and len(old_preview) > 200:
                     old_preview = old_preview[:199] + "…"
-                new_preview = (pending.new_paragraph or "").strip()
+                new_preview = (getattr(pending, "new_paragraph", "") or "").strip()
                 if new_preview and len(new_preview) > 200:
                     new_preview = new_preview[:199] + "…"
 
@@ -1160,36 +1728,36 @@ async def _(bot: Bot, event: MessageEvent):
                 msg.append(f"\n新段落（截断）：\n{new_preview}")
                 msg.append("\n回复：确认 / 取消")
                 await matcher.finish("\n".join(msg))
-        elif pending.item_index >= 0:
-            fields2 = {"content": pending.new_paragraph}
+        elif getattr(pending, "item_index", -1) >= 0:
+            fields2 = {"content": getattr(pending, "new_paragraph", "")}
             if author:
                 fields2["author"] = author
             ops = [
                 {
                     "op": "update_section_item",
-                    "section": pending.section_title,
-                    "index": pending.item_index,
+                    "section": getattr(pending, "section_title", ""),
+                    "index": getattr(pending, "item_index", -1),
                     "fields": fields2,
                 }
             ]
         else:
-            item = {"content": pending.new_paragraph}
+            item = {"content": getattr(pending, "new_paragraph", "")}
             if author:
                 item["author"] = author
             ops = [
                 {
                     "op": "append_section_item",
-                    "section": pending.section_title,
+                    "section": getattr(pending, "section_title", ""),
                     "item": item,
                 }
             ]
 
         await matcher.send("正在生成修改后的 TOML...")
         patched = await submit_ops_dry_run(
-            repo_name=pending.repo_name,
-            course_code=pending.course_code,
-            course_name=pending.course_name,
-            repo_type=pending.repo_type,
+            repo_name=getattr(pending, "repo_name", ""),
+            course_code=getattr(pending, "course_code", ""),
+            course_name=getattr(pending, "course_name", ""),
+            repo_type=getattr(pending, "repo_type", ""),
             ops=ops,
         )
         if not patched.ok or not patched.toml:
@@ -1197,33 +1765,33 @@ async def _(bot: Bot, event: MessageEvent):
             await matcher.finish(f"生成失败：{patched.message}")
 
         info = ""
-        if pending.section_title:
-            info = f"章节《{pending.section_title}》"
-        if pending.item_index >= 0:
-            info += f" 第 {pending.item_index+1} 条"
-        old_preview = (pending.old_paragraph or "").strip()
+        if getattr(pending, "section_title", ""):
+            info = f"章节《{getattr(pending, "section_title", "")}》"
+        if getattr(pending, "item_index", -1) >= 0:
+            info += f" 第 {getattr(pending, "item_index", -1)+1} 条"
+        old_preview = (getattr(pending, "old_paragraph", "") or "").strip()
         if old_preview and len(old_preview) > 200:
             old_preview = old_preview[:199] + "…"
-        new_preview = (pending.new_paragraph or "").strip()
+        new_preview = (getattr(pending, "new_paragraph", "") or "").strip()
         if new_preview and len(new_preview) > 200:
             new_preview = new_preview[:199] + "…"
 
         _PENDING[_key(event)] = Pending(
-            repo_name=pending.repo_name,
-            course_code=pending.course_code,
-            course_name=pending.course_name,
-            repo_type=pending.repo_type,
+            repo_name=getattr(pending, "repo_name", ""),
+            course_code=getattr(pending, "course_code", ""),
+            course_name=getattr(pending, "course_name", ""),
+            repo_type=getattr(pending, "repo_type", ""),
             mode="confirm",
-            section_title=pending.section_title,
-            item_index=pending.item_index,
-            old_paragraph=pending.old_paragraph,
-            new_paragraph=pending.new_paragraph,
-            want_attribution=pending.want_attribution,
-            author_name=pending.author_name,
-            author_link=pending.author_link,
+            section_title=getattr(pending, "section_title", ""),
+            item_index=getattr(pending, "item_index", -1),
+            old_paragraph=getattr(pending, "old_paragraph", ""),
+            new_paragraph=getattr(pending, "new_paragraph", ""),
+            want_attribution=getattr(pending, "want_attribution", False),
+            author_name=getattr(pending, "author_name", ""),
+            author_link=getattr(pending, "author_link", ""),
             patched_toml=patched.toml,
             target=pending.target,
-            base_toml=pending.base_toml,
+            base_toml=getattr(pending, "base_toml", ""),
         )
 
         msg = [f"即将提交：{info}".strip()]
@@ -1233,7 +1801,7 @@ async def _(bot: Bot, event: MessageEvent):
         msg.append("\n回复：确认 / 取消")
         await matcher.finish("\n".join(msg))
 
-    if pending.mode == "confirm":
+    if getattr(pending, "mode", None) == "confirm":
         ans2 = text.strip().lower()
         if ans2 in {"取消", "cancel", "c", "n", "no"}:
             _PENDING.pop(_key(event), None)
@@ -1241,23 +1809,23 @@ async def _(bot: Bot, event: MessageEvent):
         if ans2 not in {"确认", "confirm", "y", "yes", "是"}:
             await matcher.finish("请回复：确认 或 取消")
 
-        if not pending.patched_toml:
+        if not getattr(pending, "patched_toml", None):
             _PENDING.pop(_key(event), None)
             await matcher.finish("状态异常：缺少 patched TOML，请重新开始")
 
         await matcher.send("正在进行内容合规审核...")
-        mod = await moderate_toml(pending.patched_toml)
+        mod = await moderate_toml(getattr(pending, "patched_toml", ""))
         if not mod.approved:
             _PENDING.pop(_key(event), None)
             await matcher.finish(f"审核未通过：{mod.reason}")
 
         await matcher.send("审核通过，正在提交并确保 PR...")
         result = await ensure_pr(
-            repo_name=pending.repo_name,
-            course_code=pending.course_code,
-            course_name=pending.course_name,
-            repo_type=pending.repo_type,
-            toml_text=pending.patched_toml,
+            repo_name=getattr(pending, "repo_name", ""),
+            course_code=getattr(pending, "course_code", ""),
+            course_name=getattr(pending, "course_name", ""),
+            repo_type=getattr(pending, "repo_type", ""),
+            toml_text=getattr(pending, "patched_toml", ""),
         )
         _PENDING.pop(_key(event), None)
         if not result.ok:
