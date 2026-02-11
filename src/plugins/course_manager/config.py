@@ -11,6 +11,14 @@ def _env(key: str, default: str | None = None) -> str | None:
     return value if value else default
 
 
+def _env_any(keys: list[str], default: str | None = None) -> str | None:
+    for key in keys:
+        value = _env(key)
+        if value is not None:
+            return value
+    return default
+
+
 def _fallback_dir() -> Path | None:
     raw = _env("HITSZ_MANAGER_COURSE_FALLBACK_DIR", "") or ""
     raw = raw.strip()
@@ -42,10 +50,13 @@ class Config(BaseModel):
     # --- GitHub Org 同步配置（推荐） ---
     # 若设置为非空，则 /刷 会从 GitHub Org 枚举仓库并同步到 data/courses/<repo_name>/
     # 过滤规则（按你当前约定）：仓库名首字符大写，且不包含 '-'
-    GITHUB_ORG: str = _env("HITSZ_MANAGER_GITHUB_ORG", "HITSZ-OpenAuto") or ""
-    GITHUB_TOKEN: str = _env("HITSZ_MANAGER_GITHUB_TOKEN", "") or ""
+    GITHUB_ORG: str = _env_any(["HITSZ_MANAGER_GITHUB_ORG", "GITHUB_ORG"], "HITSZ-OpenAuto") or ""
+    # 兼容：很多部署习惯把 token 命名为 GITHUB_TOKEN（prServer 也用这个）。
+    # 若未提供 token，会以匿名方式调用 GitHub API，极易触发 403 rate limit。
+    GITHUB_TOKEN: str = _env_any(["HITSZ_MANAGER_GITHUB_TOKEN", "GITHUB_TOKEN"], "") or ""
     GITHUB_API_BASE: str = _env("HITSZ_MANAGER_GITHUB_API_BASE", "https://api.github.com") or ""
-    GIT_SYNC_CONCURRENCY: int = int(_env("HITSZ_MANAGER_GIT_SYNC_CONCURRENCY", "4") or 4)
+    # 默认并发略保守，降低触发 429 的概率；需要更快可通过环境变量调高。
+    GIT_SYNC_CONCURRENCY: int = int(_env("HITSZ_MANAGER_GIT_SYNC_CONCURRENCY", "2") or 2)
 
     # clone 提速：默认浅克隆，仅拉取最近提交；设为 0 可禁用（全量 clone）
     GIT_CLONE_DEPTH: int = int(_env("HITSZ_MANAGER_GIT_CLONE_DEPTH", "1") or 1)
