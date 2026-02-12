@@ -788,6 +788,9 @@ def _format_structure(summary: dict) -> str:
 
     lines: list[str] = []
     lines.append(f"结构摘要：{course_code} {course_name} ({repo_type})")
+    if repo_type == "multi-project":
+        lines.append("（multi-project：请先用 /pr target <子课程名或序号> 选中子课程，再对该子课程的 sections 进行操作）")
+        return "\n".join(lines)
     if not items:
         lines.append("（没有 sections；你可以用 /pr add <章节标题> 来新增）")
         return "\n".join(lines)
@@ -807,6 +810,181 @@ def _format_structure(summary: dict) -> str:
 
     lines.append("\n指令：/pr add <章节标题> 或 /pr edit <章节标题> <序号>")
     return "\n".join(lines)
+
+
+def _list_multi_courses_from_toml(toml_text: str) -> list[dict]:
+    """Return list of {index,name,code} for multi-project courses."""
+    doc = _doc_table(tomlkit.parse(toml_text))
+    repo_type = str(getattr(doc, "repo_type", "") or "").strip()
+    if repo_type != "multi-project":
+        return []
+    courses = _aot(doc.get("courses"))
+    out: list[dict] = []
+    if not courses:
+        return out
+    for i, c in enumerate(courses):
+        if not isinstance(c, Table):
+            continue
+        name = _safe_str(c.get("name")).strip()
+        code = _safe_str(c.get("code")).strip()
+        if not name:
+            continue
+        out.append({"index": i + 1, "name": name, "code": code})
+    return out
+
+
+def _pick_course_name(*, toml_text: str, pick: str) -> str | None:
+    """Pick course name by exact name or 1-based index (string)."""
+    items = _list_multi_courses_from_toml(toml_text)
+    if not items:
+        return None
+    raw = (pick or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        idx = int(raw)
+        for it in items:
+            if int(it.get("index") or 0) == idx:
+                return str(it.get("name") or "").strip() or None
+        return None
+    # exact match
+    for it in items:
+        if str(it.get("name") or "").strip() == raw:
+            return raw
+    return None
+
+
+def _format_multi_course_structure(*, toml_text: str, course_name: str) -> str:
+    doc = _doc_table(tomlkit.parse(toml_text))
+    lines: list[str] = []
+    lines.append(f"当前子课程：{course_name}")
+
+    courses = _aot(doc.get("courses"))
+    picked: Table | None = None
+    if courses:
+        for c in courses:
+            if not isinstance(c, Table):
+                continue
+            if _safe_str(c.get("name")).strip() == course_name:
+                picked = c
+                break
+    if not picked:
+        return "\n".join(lines + ["（未在 courses 中找到该子课程；请用 /pr target 重新选择）"])
+
+    teachers = _aot(picked.get("teachers"))
+    if teachers:
+        names: list[str] = []
+        for t in teachers:
+            if not isinstance(t, Table):
+                continue
+            n = _safe_str(t.get("name")).strip()
+            if n:
+                names.append(n)
+        if names:
+            lines.append(f"教师：{', '.join(names)}")
+
+    secs = _aot(picked.get("sections"))
+    if not secs:
+        lines.append("（该子课程暂无 sections；你可以用 /pr add <章节标题> 新增）")
+        return "\n".join(lines)
+
+    lines.append("sections：")
+    for sec in secs:
+        if not isinstance(sec, Table):
+            continue
+        title = _safe_str(sec.get("title")).strip() or "(未命名章节)"
+        items = _aot(sec.get("items"))
+        n_items = len(items) if items else 0
+        lines.append(f"- {title}（{n_items} 条）")
+
+    lines.append("\n指令：/pr add <章节标题>  或  /pr modify（按原段落定位修改）")
+    return "\n".join(lines)
+
+
+def _build_forward_nodes_for_multi_course(bot: Bot, toml_text: str, course_name: str) -> list[dict]:
+    doc = _doc_table(tomlkit.parse(toml_text))
+    segs = _extract_multi_segments(doc)
+    picked = None
+    for title, body in segs:
+        if title == course_name:
+            picked = (title, body)
+            break
+    if not picked:
+        return [make_node(bot, f"未找到子课程《{course_name}》；请用 /pr target 重新选择。")]
+
+    title, body = picked
+    nodes: list[dict] = []
+    parts = _split_long_text(body, limit=1800)
+    if len(parts) == 1:
+        nodes.append(make_node(bot, parts[0]))
+    else:
+        for i, p in enumerate(parts, start=1):
+            nodes.append(make_node(bot, f"{title}（{i}/{len(parts)}）\n\n{p}".strip()))
+    return nodes
+
+
+def _chunk_lines(lines: list[str], *, limit: int = 1800) -> list[str]:
+    out: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in lines:
+        s = (line or "")
+        add = len(s) + (1 if buf else 0)  # newline
+        if buf and size + add > limit:
+            out.append("\n".join(buf).rstrip())
+            buf = [s]
+            size = len(s)
+            continue
+        buf.append(s)
+        size += add
+    if buf:
+        out.append("\n".join(buf).rstrip())
+    return out
+
+
+async def _prompt_pick_multi_course(*, matcher, repo_name: str, hint: str = "") -> None:
+    r = await get_course_toml(repo_name=repo_name)
+    if not r.ok or not r.toml:
+        await matcher.finish(f"拉取失败：{r.message}")
+
+    toml_text = str(r.toml)
+    items = _list_multi_courses_from_toml(toml_text)
+    if not items:
+        await matcher.finish("该仓库为 multi-project，但 readme.toml 中没有 courses 列表，无法选择子课程。")
+
+    header: list[str] = []
+    if hint:
+        header.append(hint)
+    header.append(f"请先选择要编辑的子课程（共 {len(items)} 门）：")
+
+    body: list[str] = []
+    for it in items:
+        idx = int(it.get("index") or 0)
+        name = str(it.get("name") or "").strip()
+        code = str(it.get("code") or "").strip()
+        code_part = f"（{code}）" if code else ""
+        body.append(f"{idx}. {name}{code_part}")
+
+    footer = "用法：/pr target <子课程名>  或  /pr target <序号>"
+
+    # 分多条消息发送，避免超长度限制
+    chunks = _chunk_lines(body, limit=1500)
+    if not chunks:
+        await matcher.finish("该仓库没有可选子课程。")
+
+    if len(chunks) == 1:
+        await matcher.finish("\n".join(header + chunks + ["", footer]).rstrip())
+
+    for i, chunk in enumerate(chunks, start=1):
+        if i == 1:
+            text = "\n".join(header + [f"（第 {i}/{len(chunks)} 段）"] + [chunk]).rstrip()
+        else:
+            text = "\n".join([f"（第 {i}/{len(chunks)} 段）", chunk]).rstrip()
+
+        if i < len(chunks):
+            await matcher.send(text)
+        else:
+            await matcher.finish("\n".join([text, "", footer]).rstrip())
 
 
 matcher = on_message(rule=to_me(), priority=100)
@@ -1004,6 +1182,14 @@ async def _(bot: Bot, event: MessageEvent):
             mode="idle",
         )
 
+        if repo_type == "multi-project":
+            # multi-project 必须先选子课程再操作
+            await _prompt_pick_multi_course(
+                matcher=matcher,
+                repo_name=repo_name,
+                hint="已进入 PR 提交流程（multi-project）。",
+            )
+
         await matcher.finish(
             "已进入 PR 提交流程。\n"
             "- 用 /pr show 查看当前仓库内容\n"
@@ -1025,6 +1211,22 @@ async def _(bot: Bot, event: MessageEvent):
         r = await get_course_toml(repo_name=repo_key)
         if not r.ok or not r.toml:
             await matcher.finish(f"拉取失败：{r.message}")
+
+        # multi-project：必须选定子课程；show 只展示该子课程
+        if (pending.repo_type or "").strip() == "multi-project":
+            t = pending.target or {}
+            if not (isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course"):
+                await _prompt_pick_multi_course(matcher=matcher, repo_name=repo_key)
+            course_name = str((t or {}).get("course_name") or "").strip()
+            if not course_name:
+                await _prompt_pick_multi_course(matcher=matcher, repo_name=repo_key)
+
+            nodes = _build_forward_nodes_for_multi_course(bot, r.toml, course_name)
+            ok = await _send_forward(bot, event, nodes)
+            if not ok:
+                await matcher.finish("发送合并转发失败（可能风控/版本问题）。你可以改用直接粘贴整段 TOML 提交。")
+
+            await matcher.finish(_format_multi_course_structure(toml_text=r.toml, course_name=course_name))
 
         try:
             nodes = build_forward_nodes_from_toml(bot, r.toml)
@@ -1049,9 +1251,19 @@ async def _(bot: Bot, event: MessageEvent):
         if (pending.repo_type or "").strip() != "multi-project":
             await matcher.finish("该命令仅适用于 multi-project 仓库")
 
-        course_name = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) >= 3 else ""
-        if not course_name:
-            await matcher.finish("用法：/pr target <子课程名>")
+        raw_pick = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) >= 3 else ""
+        repo_key = (pending.repo_name or pending.course_code or "").strip()
+        if not repo_key:
+            await matcher.finish("缺少仓库标识（repo_name/course_code），请重新 /pr start")
+        if not raw_pick:
+            await _prompt_pick_multi_course(matcher=matcher, repo_name=repo_key)
+
+        r = await get_course_toml(repo_name=repo_key)
+        if not r.ok or not r.toml:
+            await matcher.finish(f"拉取失败：{r.message}")
+        picked_name = _pick_course_name(toml_text=r.toml, pick=raw_pick)
+        if not picked_name:
+            await _prompt_pick_multi_course(matcher=matcher, repo_name=repo_key, hint=f"未找到子课程：{raw_pick}")
 
         _PENDING[_key(event)] = Pending(
             repo_name=pending.repo_name,
@@ -1059,9 +1271,9 @@ async def _(bot: Bot, event: MessageEvent):
             course_name=pending.course_name,
             repo_type=pending.repo_type,
             mode="idle",
-            target={"type": "multi-project-course", "course_name": course_name},
+            target={"type": "multi-project-course", "course_name": picked_name},
         )
-        await matcher.finish(f"已切换当前子课程：{course_name}")
+        await matcher.finish(f"已切换当前子课程：{picked_name}\n提示：/pr show 查看该子课程；/pr add 追加 sections；/pr addreview 追加教师评价")
 
     # 命令：/pr addcourse <子课程名>（multi-project 新增一门子课程）
     if text.startswith("/pr addcourse ") or text.startswith("pr addcourse "):
@@ -1103,12 +1315,20 @@ async def _(bot: Bot, event: MessageEvent):
         parts = text.split()
         repo_type = (pending.repo_type or "").strip()
         if repo_type == "multi-project":
-            if len(parts) < 4:
-                await matcher.finish("用法：/pr addreview <子课程名> <教师名>")
-            course_name = parts[2].strip()
-            teacher = " ".join(parts[3:]).strip()
+            # 允许省略子课程名：若已 /pr target，则 /pr addreview <教师名>
+            course_name = ""
+            teacher = ""
+            if len(parts) >= 4:
+                course_name = parts[2].strip()
+                teacher = " ".join(parts[3:]).strip()
+            elif len(parts) >= 3:
+                t = pending.target or {}
+                if isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course":
+                    course_name = str(t.get("course_name") or "").strip()
+                    teacher = " ".join(parts[2:]).strip()
+
             if not course_name or not teacher:
-                await matcher.finish("用法：/pr addreview <子课程名> <教师名>")
+                await matcher.finish("用法：/pr addreview <子课程名> <教师名>（或先 /pr target 后：/pr addreview <教师名>）")
 
             _PENDING[_key(event)] = Pending(
                 repo_name=pending.repo_name,
@@ -1160,10 +1380,25 @@ async def _(bot: Bot, event: MessageEvent):
             parts = text.split()
             args = parts[2:]
             if not args:
+                t = pending.target or {}
+                if isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course":
+                    _PENDING[_key(event)] = Pending(
+                        repo_name=pending.repo_name,
+                        course_code=pending.course_code,
+                        course_name=pending.course_name,
+                        repo_type=pending.repo_type,
+                        mode="add_section",
+                        target=t,
+                    )
+                    await matcher.finish(
+                        f"当前子课程：{str(t.get('course_name') or '').strip()}\n"
+                        "请发送要追加到的章节标题（已有标题或新建标题均可）。"
+                    )
                 await matcher.finish(
-                    "用法：\n"
-                    "- /pr add <子课程名> <章节标题>\n"
-                    "- 或先 /pr target <子课程名>，再 /pr add <章节标题>"
+                    "multi-project 需要先指定子课程：\n"
+                    "- /pr target <子课程名或序号>\n"
+                    "- 然后 /pr add 进入交互，或 /pr add <章节标题>\n"
+                    "- 也可直接：/pr add <子课程名> <章节标题>"
                 )
 
             course_name = ""
@@ -1340,6 +1575,27 @@ async def _(bot: Bot, event: MessageEvent):
         section_title = text.strip()
         if not section_title:
             await matcher.finish("章节标题不能为空，请重新发送")
+        # multi-project：把“章节标题”转成 append_course_section_item target
+        if (pending.repo_type or "").strip() == "multi-project":
+            t = pending.target or {}
+            if not (isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course"):
+                await matcher.finish("multi-project 请先 /pr target 选中子课程")
+            cname = str(t.get("course_name") or "").strip()
+            if not cname:
+                await matcher.finish("multi-project 请先 /pr target 选中子课程")
+            _PENDING[_key(event)] = Pending(
+                repo_name=pending.repo_name,
+                course_code=pending.course_code,
+                course_name=pending.course_name,
+                repo_type=pending.repo_type,
+                mode="add_content",
+                target={"type": "append_course_section_item", "course_name": cname, "section": section_title},
+            )
+            await matcher.finish(
+                f"将向子课程《{cname}》章节《{section_title}》追加一条内容。\n"
+                "请下一条消息发送正文（不要带多余解释）。"
+            )
+
         _PENDING[_key(event)] = Pending(
             repo_name=pending.repo_name,
             course_code=pending.course_code,
@@ -1368,8 +1624,26 @@ async def _(bot: Bot, event: MessageEvent):
             await matcher.finish(f"拉取 TOML 失败：{r.message}")
 
         candidates = _find_paragraph_candidates(r.toml, old)
+        # multi-project：只允许修改“当前选中子课程”的条目
+        if (pending.repo_type or "").strip() == "multi-project":
+            t = pending.target or {}
+            cname = ""
+            if isinstance(t, dict) and str(t.get("type") or "") == "multi-project-course":
+                cname = str(t.get("course_name") or "").strip()
+            if not cname:
+                await _prompt_pick_multi_course(matcher=matcher, repo_name=repo_key2)
+            candidates = [
+                c
+                for c in candidates
+                if str(c.get("type") or "") in {"course_section_item", "course_teacher_review"}
+                and str(c.get("course_name") or "").strip() == cname
+            ]
         if not candidates:
-            await matcher.finish("未定位到匹配条目。请确认复制的是仓库里的原文，或提供更长的片段。")
+            await matcher.finish(
+                "未定位到匹配条目（multi-project 只会在当前选中子课程内查找）。\n"
+                "- 请确认复制的是该子课程的原文\n"
+                "- 或用 /pr target 切换子课程后重试"
+            )
 
         if len(candidates) == 1:
             c = candidates[0]
