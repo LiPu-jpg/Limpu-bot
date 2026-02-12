@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,52 @@ _PROMPT = """你是一个内容合规审核员。请审核用户提交的 readme
 
 如果无法确定，倾向于拒绝（approved=false）。
 """
+
+
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # 常见 key/token 前缀（尽量只脱敏 value，避免日志泄露）
+    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "sk-***"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{16,}\b"), "ghp_***"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{16,}\b"), "github_pat_***"),
+    # 粗略兜底：形如 TOKEN=... / KEY=... 的行
+    (re.compile(r"(?im)^(\s*(?:api_?key|token|secret|password)\s*=)\s*.+$"), r"\1 ***"),
+]
+
+
+def _redact(text: str) -> str:
+    out = text
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _try_parse_json(content: str) -> dict[str, Any] | None:
+    s = (content or "").strip()
+    if not s:
+        return None
+
+    # 1) 兼容 ```json ... ``` / ``` ... ```
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```\s*$", "", s)
+        s = s.strip()
+
+    # 2) 直接解析
+    try:
+        data = json.loads(s)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        pass
+
+    # 3) 兼容前后文：提取第一个 JSON object 块
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def _client() -> ChatOpenAI:
@@ -83,9 +130,14 @@ async def moderate_toml(toml_text: str) -> ModerationResult:
     resp = await llm.ainvoke(messages)
     content = getattr(resp, "content", "") or ""
 
-    try:
-        data = json.loads(content)
-    except Exception:
+    data = _try_parse_json(content)
+    if not data:
+        if getattr(settings, "moderation_debug", False):
+            max_chars = int(getattr(settings, "moderation_debug_max_chars", 2000) or 2000)
+            preview = _redact(content)
+            if len(preview) > max_chars:
+                preview = preview[:max_chars] + "…(truncated)"
+            print(f"[moderation] JSON 解析失败，模型原始输出（已脱敏）：\n{preview}")
         return ModerationResult(
             approved=False,
             reason="审核模型未返回可解析 JSON，请稍后重试或联系管理员",
