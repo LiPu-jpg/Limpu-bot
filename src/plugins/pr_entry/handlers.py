@@ -67,9 +67,27 @@ def _allowed(event: MessageEvent) -> bool:
 
 
 def _text(event: MessageEvent) -> str:
-    # Use plaintext so a message like "[at:qq=xxx]" is treated as empty.
-    # This improves interaction when users only @bot.
-    return (event.get_plaintext() or "").strip()
+    # 群聊里多数交互都需要 @bot（to_me）。
+    # 但用户想“留空/直接回车”时，实际发送的是“@bot”且不带文本。
+    # OneBot 的 get_plaintext() 往往会把 @ 显示成“@xxx”，导致误判为非空。
+    # 这里优先从 message 段里仅提取 text 段，忽略 at 段，从而把“只 @”视为真正的空输入。
+    try:
+        msg = getattr(event, "message", None) or event.get_message()
+        if isinstance(msg, Message):
+            parts: list[str] = []
+            for seg in msg:
+                if getattr(seg, "type", None) == "text":
+                    parts.append(str((getattr(seg, "data", None) or {}).get("text", "")))
+            s = "".join(parts).strip()
+            if s or s == "":
+                return s
+    except Exception:
+        pass
+
+    # 兜底：尽量去掉开头的 @xxx
+    s2 = (event.get_plaintext() or "").strip()
+    s2 = re.sub(r"^\s*[@＠][^\s]+\s*", "", s2)
+    return s2.strip()
 
 
 def _author_name(event: MessageEvent) -> str:
@@ -1539,7 +1557,7 @@ async def _(bot: Bot, event: MessageEvent):
                 base_toml=pending.base_toml,
                 want_attribution=True,
             )
-            await matcher.finish(f"请输入显示名字（直接回车则用：{default_author_name}）")
+            await matcher.finish(f"请输入显示名字（直接回车或只 @我 不带文字则用：{default_author_name}）")
         elif ans in {"n", "no", "否", "不要", "不留"}:
             pending = Pending(
                 repo_name=pending.repo_name,
@@ -1578,7 +1596,7 @@ async def _(bot: Bot, event: MessageEvent):
             want_attribution=True,
             author_name=name,
         )
-        await matcher.finish("可选：请输入你的主页链接（GitHub/博客等），留空则不填")
+        await matcher.finish("可选：请输入你的主页链接（GitHub/博客等），留空（或只 @我 不带文字）则不填")
 
     if getattr(pending, "mode", None) == "attrib_link":
         link = text.strip()
