@@ -1211,7 +1211,7 @@ async def _(bot: Bot, event: MessageEvent):
         if not pending:
             await matcher.finish(reply("请先 /pr start 进入流程"))
 
-        await matcher.send(reply("正在拉取内容并合并转发展示..."))
+        await matcher.send("正在拉取内容并合并转发展示...")
         repo_key = (pending.repo_name or pending.course_code or "").strip()
         if not repo_key:
             await matcher.finish("缺少仓库标识（repo_name/course_code），请重新 /pr start")
@@ -1351,10 +1351,8 @@ async def _(bot: Bot, event: MessageEvent):
                 },
             )
             await matcher.finish(
-                reply(
-                    f"将向子课程《{course_name}》教师《{teacher}》追加一条评价。\n"
-                    "请下一条消息发送要添加的正文（不要带多余解释）。"
-                )
+                f"将向子课程《{course_name}》教师《{teacher}》追加一条评价。\n"
+                "请下一条消息发送要添加的正文（不要带多余解释）。"
             )
 
         # normal
@@ -1373,10 +1371,8 @@ async def _(bot: Bot, event: MessageEvent):
             target={"type": "append_lecturer_review", "lecturer": lecturer},
         )
         await matcher.finish(
-            reply(
-                f"将向教师《{lecturer}》追加一条评价。\n"
-                "请下一条消息发送要添加的正文（不要带多余解释）。"
-            )
+            f"将向教师《{lecturer}》追加一条评价。\n"
+            "请下一条消息发送要添加的正文（不要带多余解释）。"
         )
 
     # 命令：/pr add <章节标题>
@@ -1403,18 +1399,14 @@ async def _(bot: Bot, event: MessageEvent):
                         target=t,
                     )
                     await matcher.finish(
-                        reply(
-                            f"当前子课程：{str(t.get('course_name') or '').strip()}\n"
-                            "请发送要追加到的章节标题（已有标题或新建标题均可）。"
-                        )
+                        f"当前子课程：{str(t.get('course_name') or '').strip()}\n"
+                        "请发送要追加到的章节标题（已有标题或新建标题均可）。"
                     )
                 await matcher.finish(
-                    reply(
-                        "multi-project 需要先指定子课程：\n"
-                        "- /pr target <子课程名或序号>\n"
-                        "- 然后 /pr add 进入交互，或 /pr add <章节标题>\n"
-                        "- 也可直接：/pr add <子课程名> <章节标题>"
-                    )
+                    "multi-project 需要先指定子课程：\n"
+                    "- /pr target <子课程名或序号>\n"
+                    "- 然后 /pr add 进入交互，或 /pr add <章节标题>\n"
+                    "- 也可直接：/pr add <子课程名> <章节标题>"
                 )
 
             course_name = ""
@@ -1430,11 +1422,9 @@ async def _(bot: Bot, event: MessageEvent):
                     section_title = " ".join(args).strip()
                 else:
                     await matcher.finish(
-                        reply(
-                            "multi-project 需要先指定子课程：\n"
-                            "- /pr add <子课程名> <章节标题>\n"
-                            "- 或 /pr target <子课程名> 后再 /pr add <章节标题>"
-                        )
+                        "multi-project 需要先指定子课程：\n"
+                        "- /pr add <子课程名> <章节标题>\n"
+                        "- 或 /pr target <子课程名> 后再 /pr add <章节标题>"
                     )
 
             if not course_name or not section_title:
@@ -1457,10 +1447,8 @@ async def _(bot: Bot, event: MessageEvent):
                 },
             )
             await matcher.finish(
-                reply(
-                    f"将向子课程《{course_name}》章节《{section_title}》追加一条内容。\n"
-                    "请下一条消息发送要添加的正文（不要带多余解释）。"
-                )
+                f"将向子课程《{course_name}》章节《{section_title}》追加一条内容。\n"
+                "请下一条消息发送要添加的正文（不要带多余解释）。"
             )
 
         section_title = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) >= 3 else ""
@@ -1474,10 +1462,8 @@ async def _(bot: Bot, event: MessageEvent):
                 section_title=section_title,
             )
             await matcher.finish(
-                reply(
-                    f"将向章节《{section_title}》追加一条内容。\n"
-                    "请下一条消息发送要添加的正文（不要带多余解释）。"
-                )
+                f"将向章节《{section_title}》追加一条内容。\n"
+                "请下一条消息发送要添加的正文（不要带多余解释）。"
             )
 
         _PENDING[_key(event)] = Pending(
@@ -1493,7 +1479,7 @@ async def _(bot: Bot, event: MessageEvent):
             target=pending.target or None,
             base_toml=pending.base_toml or None,
         )
-        await matcher.finish(reply("请发送要追加到的章节标题（已有标题或新建标题均可）。"))
+        await matcher.finish("请发送要追加到的章节标题（已有标题或新建标题均可）。")
 
     # 命令：/pr modify（按原段落定位修改）
     if text in {"/pr modify", "pr modify", "/pr mod", "pr mod"}:
@@ -1509,10 +1495,8 @@ async def _(bot: Bot, event: MessageEvent):
             mode="modify_old",
         )
         await matcher.finish(
-            reply(
-                "请下一条消息粘贴你要修改的“原段落”（尽量原样复制，越长越好，便于定位）。\n"
-                "提示：支持 description、sections/items、lecturers.reviews，以及 multi-project 的子课程段落（sections/items、teachers.reviews）。"
-            )
+            "请下一条消息粘贴你要修改的“原段落”（尽量原样复制，越长越好，便于定位）。\n"
+            "提示：支持 description、sections/items、lecturers.reviews，以及 multi-project 的子课程段落（sections/items、teachers.reviews）。"
         )
 
     # 命令：/pr edit <章节标题> <序号>（保留：按序号修改）
@@ -1606,7 +1590,7 @@ async def _(bot: Bot, event: MessageEvent):
                 await matcher.finish("multi-project 请先 /pr target 选中子课程")
             cname = str(t.get("course_name") or "").strip()
             if not cname:
-                await matcher.finish(reply("multi-project 请先 /pr target 选中子课程"))
+                await matcher.finish("multi-project 请先 /pr target 选中子课程")
             _PENDING[_key(event)] = Pending(
                 repo_name=pending.repo_name,
                 course_code=pending.course_code,
@@ -1638,7 +1622,7 @@ async def _(bot: Bot, event: MessageEvent):
         if len(old) < 10:
             await matcher.finish("原段落太短，建议复制更长一点的原文再试")
 
-        await matcher.send(reply("正在从仓库 TOML 中定位该段落..."))
+        await matcher.send("正在从仓库 TOML 中定位该段落...")
         repo_key2 = (pending.repo_name or pending.course_code or "").strip()
         if not repo_key2:
             _PENDING.pop(_key(event), None)
@@ -1666,11 +1650,9 @@ async def _(bot: Bot, event: MessageEvent):
             ]
         if not candidates:
             await matcher.finish(
-                reply(
-                    "未定位到匹配条目（multi-project 只会在当前选中子课程内查找）。\n"
-                    "- 请确认复制的是该子课程的原文\n"
-                    "- 或用 /pr target 切换子课程后重试"
-                )
+                "未定位到匹配条目（multi-project 只会在当前选中子课程内查找）。\n"
+                "- 请确认复制的是该子课程的原文\n"
+                "- 或用 /pr target 切换子课程后重试"
             )
 
         if len(candidates) == 1:
@@ -1689,42 +1671,32 @@ async def _(bot: Bot, event: MessageEvent):
             )
             if str(c.get("type")) == "section_item":
                 await matcher.finish(
-                    reply(
-                        f"已定位到：章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条：{c.get('preview')}\n"
-                        "请下一条消息发送修改后的完整正文。"
-                    )
+                    f"已定位到：章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条：{c.get('preview')}\n"
+                    "请下一条消息发送修改后的完整正文。"
                 )
             if str(c.get("type")) == "description":
                 await matcher.finish(
-                    reply(
-                        "已定位到：description\n"
-                        f"预览：{c.get('preview')}\n"
-                        "请下一条消息发送修改后的完整正文。"
-                    )
+                    "已定位到：description\n"
+                    f"预览：{c.get('preview')}\n"
+                    "请下一条消息发送修改后的完整正文。"
                 )
             if str(c.get("type")) == "lecturer_review":
                 await matcher.finish(
-                    reply(
-                        f"已定位到：lecturers《{c.get('lecturer')}》评价#{int(c.get('review_index') or 0)+1}\n"
-                        f"预览：{c.get('preview')}\n"
-                        "请下一条消息发送修改后的完整正文。"
-                    )
+                    f"已定位到：lecturers《{c.get('lecturer')}》评价#{int(c.get('review_index') or 0)+1}\n"
+                    f"预览：{c.get('preview')}\n"
+                    "请下一条消息发送修改后的完整正文。"
                 )
             if str(c.get("type")) == "course_section_item":
                 await matcher.finish(
-                    reply(
-                        f"已定位到：子课程《{c.get('course_name')}》章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条\n"
-                        f"预览：{c.get('preview')}\n"
-                        "请下一条消息发送修改后的完整正文。"
-                    )
+                    f"已定位到：子课程《{c.get('course_name')}》章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条\n"
+                    f"预览：{c.get('preview')}\n"
+                    "请下一条消息发送修改后的完整正文。"
                 )
             if str(c.get("type")) == "course_teacher_review":
                 await matcher.finish(
-                    reply(
-                        f"已定位到：子课程《{c.get('course_name')}》教师《{c.get('teacher')}》评价#{int(c.get('review_index') or 0)+1}\n"
-                        f"预览：{c.get('preview')}\n"
-                        "请下一条消息发送修改后的完整正文。"
-                    )
+                    f"已定位到：子课程《{c.get('course_name')}》教师《{c.get('teacher')}》评价#{int(c.get('review_index') or 0)+1}\n"
+                    f"预览：{c.get('preview')}\n"
+                    "请下一条消息发送修改后的完整正文。"
                 )
             await matcher.finish(reply("已定位到目标。请下一条消息发送修改后的完整正文。"))
 
@@ -1763,7 +1735,7 @@ async def _(bot: Bot, event: MessageEvent):
             old_paragraph=old,
             base_toml=r.toml,
         )
-        await matcher.finish(reply("\n".join(lines)))
+        await matcher.finish("\n".join(lines))
 
     if getattr(pending, "mode", None) == "modify_choose":
         if not pending.candidates:
@@ -1772,7 +1744,7 @@ async def _(bot: Bot, event: MessageEvent):
         try:
             pick = int(text.strip())
         except Exception:
-            await matcher.finish(reply("请回复数字序号（例如 1）"))
+            await matcher.finish("请回复数字序号（例如 1）")
         if pick <= 0 or pick > len(pending.candidates):
             await matcher.finish("序号超出范围")
         c = pending.candidates[pick - 1]
@@ -1791,33 +1763,25 @@ async def _(bot: Bot, event: MessageEvent):
         ctype2 = str(c.get("type") or "")
         if ctype2 == "section_item":
             await matcher.finish(
-                reply(
-                    f"已选择：章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条：{c.get('preview')}\n"
-                    "请下一条消息发送修改后的完整正文。"
-                )
+                f"已选择：章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条：{c.get('preview')}\n"
+                "请下一条消息发送修改后的完整正文。"
             )
         if ctype2 == "description":
             await matcher.finish(reply("已选择：description\n请下一条消息发送修改后的完整正文。"))
         if ctype2 == "lecturer_review":
             await matcher.finish(
-                reply(
-                    f"已选择：lecturers《{c.get('lecturer')}》评价#{int(c.get('review_index') or 0)+1}\n"
-                    "请下一条消息发送修改后的完整正文。"
-                )
+                f"已选择：lecturers《{c.get('lecturer')}》评价#{int(c.get('review_index') or 0)+1}\n"
+                "请下一条消息发送修改后的完整正文。"
             )
         if ctype2 == "course_section_item":
             await matcher.finish(
-                reply(
-                    f"已选择：子课程《{c.get('course_name')}》章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条\n"
-                    "请下一条消息发送修改后的完整正文。"
-                )
+                f"已选择：子课程《{c.get('course_name')}》章节《{c.get('section')}》第 {int(c.get('index') or 0)+1} 条\n"
+                "请下一条消息发送修改后的完整正文。"
             )
         if ctype2 == "course_teacher_review":
             await matcher.finish(
-                reply(
-                    f"已选择：子课程《{c.get('course_name')}》教师《{c.get('teacher')}》评价#{int(c.get('review_index') or 0)+1} 条\n"
-                    "请下一条消息发送修改后的完整正文。"
-                )
+                f"已选择：子课程《{c.get('course_name')}》教师《{c.get('teacher')}》评价#{int(c.get('review_index') or 0)+1}\n"
+                "请下一条消息发送修改后的完整正文。"
             )
         await matcher.finish(reply("已选择目标。请下一条消息发送修改后的完整正文。"))
 
@@ -1839,7 +1803,7 @@ async def _(bot: Bot, event: MessageEvent):
             target=pending.target,
             base_toml=pending.base_toml,
         )
-        await matcher.finish(reply("是否在该条目 author 中留名？回复 y/n"))
+        await matcher.finish("是否在该条目 author 中留名？回复 y/n")
 
     # add/edit flow (by title/index): ask attribution after receiving content
     if getattr(pending, "mode", None) in {"add_content", "edit_content"}:
@@ -1858,7 +1822,7 @@ async def _(bot: Bot, event: MessageEvent):
             target=pending.target,
             base_toml=pending.base_toml,
         )
-        await matcher.finish(reply("是否在该条目 author 中留名？回复 y/n"))
+        await matcher.finish("是否在该条目 author 中留名？回复 y/n")
 
     if getattr(pending, "mode", None) == "attrib_ask":
         ans = text.strip().lower()
@@ -1894,7 +1858,7 @@ async def _(bot: Bot, event: MessageEvent):
                 want_attribution=False,
             )
             _PENDING[_key(event)] = pending
-            await matcher.send(reply("好的，不留名。"))
+            await matcher.send("好的，不留名。")
             # fallthrough to build_patch below
         else:
             await matcher.finish(reply("请回复 y 或 n"))
@@ -1937,7 +1901,7 @@ async def _(bot: Bot, event: MessageEvent):
             author_link=link,
         )
         _PENDING[_key(event)] = pending
-        await matcher.send(reply("收到。"))
+        await matcher.send("收到。")
         # fallthrough to build_patch below
 
     if getattr(pending, "mode", None) == "build_patch":
@@ -2143,7 +2107,7 @@ async def _(bot: Bot, event: MessageEvent):
         ans2 = text.strip().lower()
         if ans2 in {"取消", "cancel", "c", "n", "no"}:
             _PENDING.pop(_key(event), None)
-            await matcher.finish(reply("已取消本次修改"))
+            await matcher.finish("已取消本次修改")
         if ans2 not in {"确认", "confirm", "y", "yes", "是"}:
             await matcher.finish(reply("请回复：确认 或 取消"))
 
