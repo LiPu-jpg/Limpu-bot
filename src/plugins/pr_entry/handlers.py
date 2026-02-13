@@ -1021,29 +1021,30 @@ async def _(bot: Bot, event: MessageEvent):
 
     # 检测是否仅仅是 @ 机器人
     if not text.strip():
-        await matcher.finish(
-            "🎓 你好！我是 HITSZ 课程助理 Hoa_Anon酱\n"
-            "找课程请记得 @我 并使用以下指令：\n"
-            "━━━━━━━━━━━━━━\n"
-            "【课程查询】\n"
-            "- /搜 <关键词>：模糊搜索课程\n"
-            "- /查 <课程代码|全名|昵称>：查看详细评价（合并转发）\n"
-            "- /设置昵称 <昵称> <课程代码>：绑定昵称\n"
-            "- /刷：拉取课程仓库并更新数据\n"
-            "━━━━━━━━━━━━━━\n"
-            "【问答（RAG）】\n"
-            "- /重构知识库：重建向量库（较耗资源，建议低峰使用）\n"
-            "- /问 <问题>：基于知识库问答\n"
-            "━━━━━━━━━━━━━━\n"
-            "【PR 提交】\n"
-            "- /pr help：查看流程说明\n"
-            "- /pr start <repo> <code> <name...> <repo_type>：进入会话\n"
-            "- /pr show：展示 readme.toml（分段合并转发）\n"
-            "- /pr add：追加内容；/pr edit：按序号修改；/pr modify：按原段落定位修改\n"
-            "- /pr cancel：取消当前会话\n"
-            "━━━━━━━━━━━━━━\n"
-            "🌐 网页版：https://v3.hoa.moe"
-        )
+        if not _PENDING.get(_key(event)):
+            await matcher.finish(
+                "🎓 你好！我是 HITSZ 课程助理 Hoa_Anon酱\n"
+                "找课程请记得 @我 并使用以下指令：\n"
+                "━━━━━━━━━━━━━━\n"
+                "【课程查询】\n"
+                "- /搜 <关键词>：模糊搜索课程\n"
+                "- /查 <课程代码|全名|昵称>：查看详细评价（合并转发）\n"
+                "- /设置昵称 <昵称> <课程代码>：绑定昵称\n"
+                "- /刷：拉取课程仓库并更新数据\n"
+                "━━━━━━━━━━━━━━\n"
+                "【问答（RAG）】\n"
+                "- /重构知识库：重建向量库（较耗资源，建议低峰使用）\n"
+                "- /问 <问题>：基于知识库问答\n"
+                "━━━━━━━━━━━━━━\n"
+                "【PR 提交】\n"
+                "- /pr help：查看流程说明\n"
+                "- /pr start <repo> <code> <name...> <repo_type>：进入会话\n"
+                "- /pr show：展示 readme.toml（分段合并转发）\n"
+                "- /pr add：追加内容；/pr edit：按序号修改；/pr modify：按原段落定位修改\n"
+                "- /pr cancel：取消当前会话\n"
+                "━━━━━━━━━━━━━━\n"
+                "🌐 网页版：https://v3.hoa.moe"
+            )
 
     # 命令：/pr help
     if text in {"/pr", "/pr help", "pr", "pr help"}:
