@@ -8,12 +8,10 @@ __plugin_meta__ = PluginMetadata(
     usage=(
         "/pr help\n"
         "/pr start AUTO2001  （推荐：只填仓库/课程代码）\n"
-        "或 /pr start 自动化专业导论  （支持：课程全名/昵称/课程代码；若能解析到代码则自动补全）\n"
-        "（兼容）/pr start <repo_name> <course_code> <course_name...> <repo_type>\n"
-        "/pr show\n"
+        "或 /pr start 自动化专业导论  （支持：课程全名/昵称/课程代码）\n"
+        "/pr show （展示当前内容）\n"
         "/pr add <章节标题>\n"
-        "/pr modify\n"
-        "（按提示发送原段落/新段落，或直接粘贴整段 TOML）\n"
+        "/pr modify （按提示进行内容替换）\n"
         "/pr cancel"
     ),
 )
