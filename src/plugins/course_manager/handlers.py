@@ -294,6 +294,91 @@ async def handle_query(bot: Bot, event: MessageEvent, target: str):
 
 
 # =======================
+# 功能 2.5: 教师评价查询
+# =======================
+# 触发：@bot 查老师 裴文杰  或  @bot 查老师 pwj
+matcher_teacher_query = on_alconna(
+    Alconna("查老师", Args["target", str]),
+    aliases={"teacher", "老师"},
+    use_cmd_start=True,
+    rule=to_me(),
+    priority=10,
+)
+
+
+@matcher_teacher_query.handle()
+async def handle_teacher_query(target: str):
+    q = (target or "").strip()
+    if not q:
+        await matcher_teacher_query.finish("用法：/查老师 <教师姓名或拼音首字母>\n示例：/查老师 裴文杰  或  /查老师 pwj")
+
+    matches = course_manager.search_teacher_reviews(q)
+    if not matches:
+        await matcher_teacher_query.finish(f"🧐 未找到教师“{q}”的评价。")
+
+    def _norm_text(s: str) -> str:
+        return (s or "").strip().replace("\r\n", "\n")
+
+    def _safe_str(v) -> str:
+        return "" if v is None else str(v)
+
+    def _fmt_author(d) -> str:
+        if not isinstance(d, dict):
+            return ""
+        name = _safe_str(d.get("name")).strip()
+        link = _safe_str(d.get("link")).strip()
+        date = _safe_str(d.get("date")).strip()
+        tail = " ".join([x for x in [name, date] if x])
+        if link:
+            tail = (tail + " " + link).strip()
+        return f"\n👤 {tail}" if tail else ""
+
+    lines: list[str] = []
+    total_reviews = sum(len(m.get("reviews") or []) for m in matches)
+    lines.append(f"👨‍🏫 教师评价检索：{q}")
+    lines.append(f"命中条目：{len(matches)}，评价总数：{total_reviews}")
+
+    shown_items = matches[:20]
+    for i, rec in enumerate(shown_items, start=1):
+        teacher_name = _safe_str(rec.get("teacher_name") or "(未命名教师)")
+        course_code = _safe_str(rec.get("course_code") or "")
+        course_name = _safe_str(rec.get("course_name") or "")
+        sub_course_name = _safe_str(rec.get("sub_course_name") or "")
+
+        title = f"{i}. {teacher_name}"
+        course_part = f"{course_name}（{course_code}）" if course_name and course_code else (course_name or course_code)
+        if sub_course_name:
+            course_part = (course_part + f" / 子课程：{sub_course_name}").strip(" /")
+        if course_part:
+            title += f"\n   📚 {course_part}"
+        lines.append(title)
+
+        reviews = rec.get("reviews") if isinstance(rec.get("reviews"), list) else []
+        for j, rv in enumerate(reviews[:5], start=1):
+            if not isinstance(rv, dict):
+                continue
+            content = _norm_text(_safe_str(rv.get("content")))
+            if len(content) > 220:
+                content = content[:219] + "…"
+            lines.append(f"   {j}) {content}{_fmt_author(rv.get('author'))}")
+
+        if len(reviews) > 5:
+            lines.append(f"   … 该条目还有 {len(reviews) - 5} 条未展示")
+
+    if len(matches) > 20:
+        lines.append(f"\n（仅展示前 20 条命中，剩余 {len(matches) - 20} 条）")
+
+    text = "\n".join(lines).strip()
+    chunk_size = 1500
+    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    for idx, ch in enumerate(chunks):
+        if idx < len(chunks) - 1:
+            await matcher_teacher_query.send(ch)
+        else:
+            await matcher_teacher_query.finish(ch)
+
+
+# =======================
 # 功能 3: 昵称设置
 # =======================
 # 触发：@bot 设置昵称 自动控制 AUTO1001

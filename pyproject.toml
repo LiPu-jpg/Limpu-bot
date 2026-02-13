@@ -19,7 +19,8 @@ dependencies = [
     "langchain-huggingface>=0.0.1", # 调用 HuggingFace Embedding
     "chromadb>=0.4.22",           # 向量数据库
     "sentence-transformers>=2.3.0", # 本地 Embedding 模型支持
-    "thefuzz>=0.19.0"             # 模糊匹配 (你之前已经有了，确保写上)
+    "thefuzz>=0.19.0",            # 模糊匹配 (你之前已经有了，确保写上)
+    "pypinyin>=0.52.0"            # 教师姓名拼音首字母检索（如 裴文杰 -> pwj）
 ]
 
 [tool.nonebot]

@@ -3,6 +3,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import git
@@ -18,13 +19,160 @@ class CourseManager:
         self.course_map: Dict[str, Dict[str, Any]] = {}
         # nicknames: key=昵称, value=COURSE_CODE
         self.nicknames: Dict[str, str] = {}
+        # 教师索引：records 保存明细，lookup 保存可检索 key -> record 下标列表
+        self.teacher_records: List[Dict[str, Any]] = []
+        self.teacher_lookup: Dict[str, List[int]] = {}
 
     def load_data(self):
         """主加载流程"""
         print("📥 开始加载课程数据...")
         self._load_from_toml()
         self._load_nicknames()
-        print(f"🚀 数据加载完成: 课程 {len(self.course_map)} 门, 昵称 {len(self.nicknames)} 个")
+        self._build_teacher_index()
+        print(
+            f"🚀 数据加载完成: 课程 {len(self.course_map)} 门, 昵称 {len(self.nicknames)} 个, "
+            f"教师条目 {len(self.teacher_records)} 条"
+        )
+
+    def _normalize_key(self, s: str) -> str:
+        return re.sub(r"\s+", "", (s or "").strip().lower())
+
+    def _teacher_initials(self, name: str) -> str:
+        text = (name or "").strip()
+        if not text:
+            return ""
+
+        try:
+            from pypinyin import lazy_pinyin, Style
+
+            parts = lazy_pinyin(text, style=Style.FIRST_LETTER, strict=False, errors="ignore")
+            return "".join([p for p in parts if p and p.isalpha()]).lower()
+        except Exception:
+            return "".join([ch for ch in text.lower() if ch.isalpha()])
+
+    def _build_teacher_index(self) -> None:
+        self.teacher_records = []
+        lookup: Dict[str, List[int]] = defaultdict(list)
+
+        def _add_record(
+            *,
+            teacher_name: str,
+            course_code: str,
+            course_name: str,
+            sub_course_name: str,
+            reviews: List[Dict[str, Any]],
+        ) -> None:
+            tname = str(teacher_name or "").strip()
+            if not tname:
+                return
+            reviews2 = [r for r in (reviews or []) if isinstance(r, dict) and str(r.get("content") or "").strip()]
+            if not reviews2:
+                return
+
+            initials = self._teacher_initials(tname)
+            rec = {
+                "teacher_name": tname,
+                "teacher_name_key": self._normalize_key(tname),
+                "teacher_initials": initials,
+                "course_code": str(course_code or "").strip().upper(),
+                "course_name": str(course_name or "").strip(),
+                "sub_course_name": str(sub_course_name or "").strip(),
+                "reviews": reviews2,
+            }
+            idx = len(self.teacher_records)
+            self.teacher_records.append(rec)
+
+            keys = {
+                rec["teacher_name_key"],
+                self._normalize_key(tname.replace("·", "")),
+            }
+            if initials:
+                keys.add(initials)
+            for k in keys:
+                if k:
+                    lookup[k].append(idx)
+
+        for course in self.courses_cache:
+            if not isinstance(course, dict):
+                continue
+
+            if course.get("_schema") == "multi-project-item":
+                continue
+
+            repo_type = str(course.get("repo_type") or "").strip()
+            if repo_type == "multi-project" and isinstance(course.get("courses"), list):
+                parent_code = str(course.get("course_code") or "").strip().upper()
+                parent_name = str(course.get("course_name") or "").strip()
+                for sub in course.get("courses"):
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_name = str(sub.get("name") or "").strip()
+                    teachers = sub.get("teachers")
+                    if not isinstance(teachers, list):
+                        continue
+                    for t in teachers:
+                        if not isinstance(t, dict):
+                            continue
+                        _add_record(
+                            teacher_name=str(t.get("name") or "").strip(),
+                            course_code=parent_code,
+                            course_name=parent_name,
+                            sub_course_name=sub_name,
+                            reviews=t.get("reviews") if isinstance(t.get("reviews"), list) else [],
+                        )
+                continue
+
+            # normal schema
+            code = str(course.get("course_code") or "").strip().upper()
+            name = str(course.get("course_name") or "").strip()
+            lecturers = course.get("lecturers")
+            if not isinstance(lecturers, list):
+                continue
+            for lec in lecturers:
+                if not isinstance(lec, dict):
+                    continue
+                _add_record(
+                    teacher_name=str(lec.get("name") or "").strip(),
+                    course_code=code,
+                    course_name=name,
+                    sub_course_name="",
+                    reviews=lec.get("reviews") if isinstance(lec.get("reviews"), list) else [],
+                )
+
+        self.teacher_lookup = dict(lookup)
+
+    def search_teacher_reviews(self, query: str) -> List[Dict[str, Any]]:
+        q = self._normalize_key(query)
+        if not q:
+            return []
+
+        scores: Dict[int, int] = {}
+
+        # 1) 精确 key 命中（全名或首字母）
+        for idx in self.teacher_lookup.get(q, []):
+            scores[idx] = max(scores.get(idx, 0), 100)
+
+        # 2) 部分命中兜底
+        for idx, rec in enumerate(self.teacher_records):
+            name_key = str(rec.get("teacher_name_key") or "")
+            initials = str(rec.get("teacher_initials") or "")
+            if q and q in name_key:
+                scores[idx] = max(scores.get(idx, 0), 80)
+            elif initials and initials.startswith(q):
+                scores[idx] = max(scores.get(idx, 0), 70)
+            elif initials and q in initials:
+                scores[idx] = max(scores.get(idx, 0), 60)
+
+        ranked = sorted(
+            scores.items(),
+            key=lambda x: (
+                -x[1],
+                str(self.teacher_records[x[0]].get("teacher_name") or ""),
+                str(self.teacher_records[x[0]].get("course_code") or ""),
+                str(self.teacher_records[x[0]].get("sub_course_name") or ""),
+            ),
+        )
+        return [self.teacher_records[idx] for idx, _ in ranked[:50]]
 
     def _load_from_toml(self):
         self.courses_cache.clear()
