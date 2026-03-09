@@ -12,6 +12,7 @@ from .settings import settings
 class SubmitResult:
     ok: bool
     message: str
+    status: str | None = None
     pr_url: str | None = None
     request_id: str | None = None
     toml: str | None = None
@@ -22,6 +23,50 @@ def _headers() -> dict[str, str]:
     if settings.prserver_api_key:
         return {"X-Api-Key": settings.prserver_api_key}
     return {}
+
+
+def _parse_submit_result(data: dict[str, Any]) -> SubmitResult:
+    status = str(data.get("status") or "").strip() or None
+    pr_url = data.get("pr_url")
+    request_id = data.get("request_id")
+    toml = data.get("toml")
+
+    if pr_url:
+        if status == "cache_pr_created":
+            return SubmitResult(
+                ok=True,
+                message="课程仓库不存在，已创建 hoa-cache 建议目录 PR",
+                status=status,
+                pr_url=str(pr_url),
+                toml=str(toml) if toml else None,
+                data=data,
+            )
+        return SubmitResult(
+            ok=True,
+            message="PR 已创建",
+            status=status or "pr_created",
+            pr_url=str(pr_url),
+            toml=str(toml) if toml else None,
+            data=data,
+        )
+
+    if request_id:
+        return SubmitResult(
+            ok=True,
+            message="仓库不存在，已进入 pending",
+            status=status or "waiting_repo",
+            request_id=str(request_id),
+            toml=str(toml) if toml else None,
+            data=data,
+        )
+
+    return SubmitResult(
+        ok=True,
+        message=f"提交完成：{status or data}",
+        status=status,
+        toml=str(toml) if toml else None,
+        data=data,
+    )
 
 
 async def submit_course(
@@ -55,13 +100,7 @@ async def submit_course(
     except Exception as e:
         return SubmitResult(ok=False, message=f"请求 prServer 失败: {e}")
 
-    pr_url = data.get("pr_url")
-    request_id = data.get("request_id")
-    if pr_url:
-        return SubmitResult(ok=True, message="PR 已创建", pr_url=str(pr_url))
-    if request_id:
-        return SubmitResult(ok=True, message="仓库不存在，已进入 pending", request_id=str(request_id))
-    return SubmitResult(ok=True, message=f"提交成功，但返回未知字段: {data}")
+    return _parse_submit_result(data)
 
 
 async def get_course_structure(*, repo_name: str) -> SubmitResult:
@@ -165,7 +204,7 @@ async def ensure_pr(
     if repo_name:
         payload["repo_name"] = repo_name
 
-    url = f"{base}/v1/pr/ensure"
+    url = f"{base}/v1/courses/submit"
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             r = await client.post(url, headers=_headers(), json=payload)
@@ -175,11 +214,4 @@ async def ensure_pr(
     except Exception as e:
         return SubmitResult(ok=False, message=f"请求 prServer 失败: {e}")
 
-    pr_url = data.get("pr_url")
-    request_id = data.get("request_id")
-    status = str(data.get("status") or "")
-    if pr_url:
-        return SubmitResult(ok=True, message=f"{status or 'ok'}", pr_url=str(pr_url))
-    if request_id:
-        return SubmitResult(ok=True, message=f"{status or 'waiting_repo'}", request_id=str(request_id))
-    return SubmitResult(ok=True, message=f"{status or 'ok'}: {data}")
+    return _parse_submit_result(data)

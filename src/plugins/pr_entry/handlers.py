@@ -120,6 +120,16 @@ def make_node(bot: Bot, content: str, name: str = "hoa-pr bot") -> dict:
     }
 
 
+def _submit_result_text(result) -> str:
+    if result.pr_url:
+        if getattr(result, "status", None) == "cache_pr_created":
+            return f"课程仓库不存在，已创建 hoa-cache 建议目录 PR：{result.pr_url}"
+        return f"已创建/更新 PR：{result.pr_url}"
+    if result.request_id:
+        return f"仓库不存在，已进入 pending：request_id={result.request_id}"
+    return f"提交完成：{result.message}"
+
+
 def _split_long_text(text: str, *, limit: int = 1800) -> list[str]:
     s = (text or "").strip()
     if not s:
@@ -1574,11 +1584,7 @@ async def _(bot: Bot, event: MessageEvent):
         _PENDING.pop(_key(event), None)
         if not r.ok:
             await matcher.finish(f"提交失败：{r.message}")
-        if r.pr_url:
-            await matcher.finish(f"已创建/更新 PR：{r.pr_url}")
-        if r.request_id:
-            await matcher.finish(f"仓库不存在，已进入 pending：request_id={r.request_id}")
-        await matcher.finish(f"提交完成：{r.message}")
+        await matcher.finish(_submit_result_text(r))
 
     # collect section title for add
     if getattr(pending, "mode", None) == "add_section":
@@ -2134,20 +2140,10 @@ async def _(bot: Bot, event: MessageEvent):
         _PENDING.pop(_key(event), None)
         if not result.ok:
             await matcher.finish(f"提交失败：{result.message}")
-        if result.pr_url:
-            await matcher.finish(f"已创建/更新 PR：{result.pr_url}")
-        if result.request_id:
-            await matcher.finish(f"仓库不存在，已进入 pending：request_id={result.request_id}")
-        await matcher.finish(f"提交完成：{result.message}")
+        await matcher.finish(_submit_result_text(result))
 
     # unknown mode
     _PENDING.pop(_key(event), None)
     await matcher.finish("状态异常：已重置会话，请重新 /pr start")
 
-    if result.pr_url:
-        await matcher.finish(f"✅ 已创建 PR：{result.pr_url}")
-
-    if result.request_id:
-        await matcher.finish(f"✅ 已进入 pending：request_id={result.request_id}")
-
-    await matcher.finish(f"✅ 提交完成：{result.message}")
+    await matcher.finish(_submit_result_text(result))
