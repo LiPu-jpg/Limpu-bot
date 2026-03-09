@@ -92,7 +92,7 @@ async def submit_course(
 
     url = f"{base}/v1/courses/submit"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             r = await client.post(url, headers=_headers(), json=payload)
         if r.status_code >= 400:
             return SubmitResult(ok=False, message=f"prServer 返回 {r.status_code}: {r.text}")
@@ -169,7 +169,7 @@ async def submit_ops_dry_run(
 
     url = f"{base}/v1/courses/submit_ops"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(url, headers=_headers(), json=payload)
         if r.status_code >= 400:
             return SubmitResult(ok=False, message=f"prServer 返回 {r.status_code}: {r.text}")
@@ -206,7 +206,7 @@ async def ensure_pr(
 
     url = f"{base}/v1/courses/submit"
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             r = await client.post(url, headers=_headers(), json=payload)
         if r.status_code >= 400:
             return SubmitResult(ok=False, message=f"prServer 返回 {r.status_code}: {r.text}")
