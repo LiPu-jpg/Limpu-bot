@@ -154,6 +154,8 @@ def _submit_result_text(result) -> str:
             return f"课程仓库不存在，已创建 hoa-cache 建议目录 PR：{result.pr_url}"
         return f"已创建/更新 PR：{result.pr_url}"
     if result.request_id:
+        if getattr(result, "status", None) in {"queued", "running"}:
+            return f"已进入后台处理：request_id={result.request_id}。请稍后查看结果。"
         return f"仓库不存在，已进入 pending：request_id={result.request_id}"
     return f"提交完成：{result.message}"
 

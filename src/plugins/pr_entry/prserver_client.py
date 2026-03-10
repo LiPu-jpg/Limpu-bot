@@ -31,6 +31,16 @@ def _parse_submit_result(data: dict[str, Any]) -> SubmitResult:
     request_id = data.get("request_id")
     toml = data.get("toml")
 
+    if request_id and status in {"queued", "running"}:
+        return SubmitResult(
+            ok=True,
+            message="提交已进入后台队列，请稍后查看结果",
+            status=status,
+            request_id=str(request_id),
+            toml=str(toml) if toml else None,
+            data=data,
+        )
+
     if pr_url:
         if status == "cache_pr_created":
             return SubmitResult(
