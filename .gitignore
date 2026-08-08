@@ -12,6 +12,7 @@ __pycache__/
 # NoneBot env files
 .env
 .env.*
+!.env.example
 
 # Local data / caches
 /data/
